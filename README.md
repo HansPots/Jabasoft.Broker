@@ -38,6 +38,6 @@ builder.Services.AddHttpClient<IAiBrokerClient, AiBrokerClient>(c =>
 Zie `Jabasoft.Base/AiBroker/IAiBrokerClient.cs` voor de contracten
 (`ChatAsync`, `EmbedAsync`, `TestConnectionAsync`, `ListModelsAsync`).
 
-Referenties naar sibling-repo's onder `C:\Repos`: `Jabasoft.Shared`
+Referenties naar sibling-repo's onder `C:\Repos`: `Jabasoft.Stylebook`
 (`Shared.Telemetry`, voor het wegschrijven van tokenverbruik) en
 `Jabasoft.Base` (de gedeelde client-contracten hierboven).
