@@ -6,7 +6,7 @@ namespace Jabasoft.Broker;
 
 /// <summary>
 /// The actual outbound HTTP calls to Ollama/LM Studio - merged from
-/// JabaSoft.TabStudio's and JabaSoftLocalAiStudio's near-identical (LM
+/// JabaSoft.TabStudio's and JabaSoft.LocalAiStudio's near-identical (LM
 /// Studio-only vs. provider-aware) Infrastructure.LLM projects, now living
 /// in exactly one place. Every JabaSoft app talks to this indirectly, via
 /// Jabasoft.Base.AiBroker.IAiBrokerClient over HTTP.
