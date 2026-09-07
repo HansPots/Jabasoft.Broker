@@ -31,8 +31,15 @@ dotnet run --no-launch-profile --urls http://localhost:5310
 <ProjectReference Include="..\..\Jabasoft.Base\Jabasoft.Base.csproj" />
 ```
 ```csharp
+// Timeout moet gelijk zijn aan (of langer dan) de Broker's eigen "chat"-
+// HttpClient-timeout (5 minuten, zie Program.cs) - de .NET-default van
+// 100s knapt anders eerder af dan de Broker een trage/koude lokale
+// modelrespons mag laten duren.
 builder.Services.AddHttpClient<IAiBrokerClient, AiBrokerClient>(c =>
-    c.BaseAddress = new Uri(AiBrokerClient.DefaultBaseUrl));
+{
+    c.BaseAddress = new Uri(AiBrokerClient.DefaultBaseUrl);
+    c.Timeout = TimeSpan.FromMinutes(5);
+});
 ```
 
 Zie `Jabasoft.Base/AiBroker/IAiBrokerClient.cs` voor de contracten
