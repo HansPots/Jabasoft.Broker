@@ -3,8 +3,7 @@ using System.Net.Sockets;
 namespace Jabasoft.Broker;
 
 /// <summary>
-/// Builds a plain-English message for a failed HTTP connection attempt.
-/// Carried over unchanged from JabaSoft.LocalAiStudio's Infrastructure.LLM -
+/// Builds a plain-English message for a failed HTTP connection attempt -
 /// SocketException.Message is produced by the OS and follows the machine's
 /// Windows display language, not any app's own culture settings.
 /// </summary>

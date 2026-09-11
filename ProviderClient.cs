@@ -5,11 +5,11 @@ using Jabasoft.Base.AiBroker;
 namespace Jabasoft.Broker;
 
 /// <summary>
-/// The actual outbound HTTP calls to Ollama/LM Studio - merged from
-/// JabaSoft.TabStudio's and JabaSoft.LocalAiStudio's near-identical (LM
-/// Studio-only vs. provider-aware) Infrastructure.LLM projects, now living
-/// in exactly one place. Every JabaSoft app talks to this indirectly, via
-/// Jabasoft.Base.AiBroker.IAiBrokerClient over HTTP.
+/// The actual outbound HTTP calls to Ollama/LM Studio - one place for both
+/// providers' REST shapes, so every JabaSoft app can talk to either
+/// through the same <see cref="IAiBrokerClient"/> contract without knowing
+/// the difference. Every app reaches this only indirectly, over HTTP via
+/// <see cref="IAiBrokerClient"/>.
 /// </summary>
 internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
 {
