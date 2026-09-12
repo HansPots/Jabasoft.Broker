@@ -6,8 +6,7 @@ zelf apart doet. Regelt:
 
 - de daadwerkelijke HTTP-aanroepen naar het model (chat, embeddings, modellenlijst, verbindingstest);
 - een wachtrij per `(provider, serverUrl)` zodat gelijktijdige aanvragen van meerdere apps niet tegelijk bij dezelfde lokale server aankomen;
-- een korte cache voor de modellenlijst/bereikbaarheids-check, zodat niet elke app apart hoeft te pollen;
-- het wegschrijven van tokenverbruik naar de gedeelde `JabasoftBase`-database (via `Shared.Telemetry`), zodat apps dat niet meer zelf hoeven te doen.
+- een korte cache voor de modellenlijst/bereikbaarheids-check, zodat niet elke app apart hoeft te pollen.
 
 Elke app **behoudt zijn eigen instellingen** (provider, server-URL, welk
 model) — die geeft de app gewoon per aanroep mee; de broker onthoudt zelf
@@ -44,7 +43,3 @@ builder.Services.AddHttpClient<IAiBrokerClient, AiBrokerClient>(c =>
 
 Zie `Jabasoft.Base/AiBroker/IAiBrokerClient.cs` voor de contracten
 (`ChatAsync`, `EmbedAsync`, `TestConnectionAsync`, `ListModelsAsync`).
-
-Referenties naar sibling-repo's onder `C:\Repos`: `Jabasoft.Stylebook`
-(`Shared.Telemetry`, voor het wegschrijven van tokenverbruik) en
-`Jabasoft.Base` (de gedeelde client-contracten hierboven).

@@ -8,7 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Jabasoft.Stylebook\Shared.Telemetry\Shared.Telemetry.csproj" />
     <ProjectReference Include="..\Jabasoft.Base\Jabasoft.Base.csproj" />
   </ItemGroup>
 
