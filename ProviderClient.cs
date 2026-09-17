@@ -134,14 +134,33 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
             return new ChatResult(false, string.Empty, "LM Studio responded, but with an empty answer.");
         }
 
-        // LM Studio only reports a combined total - see ChatResult's own doc
-        // comment for why that goes entirely into PromptTokens.
-        var totalTokens = document.RootElement.TryGetProperty("usage", out var usageElement) &&
-                           usageElement.TryGetProperty("total_tokens", out var totalTokensElement)
-            ? totalTokensElement.GetInt64()
-            : 0;
+        // LM Studio geeft vraag en antwoord apart op (prompt_tokens /
+        // completion_tokens), net als Ollama. Geeft een versie alleen een
+        // totaal, dan gaat dat volledig naar de promptkant - zie het
+        // commentaar bij ChatResult - want een totaal is geen antwoord.
+        long promptTokens = 0;
+        long completionTokens = 0;
 
-        return new ChatResult(true, text.Trim(), null, totalTokens, 0);
+        if (document.RootElement.TryGetProperty("usage", out var usageElement))
+        {
+            if (usageElement.TryGetProperty("prompt_tokens", out var promptElement))
+            {
+                promptTokens = promptElement.GetInt64();
+            }
+
+            if (usageElement.TryGetProperty("completion_tokens", out var completionElement))
+            {
+                completionTokens = completionElement.GetInt64();
+            }
+
+            if (promptTokens == 0 && completionTokens == 0 &&
+                usageElement.TryGetProperty("total_tokens", out var totalTokensElement))
+            {
+                promptTokens = totalTokensElement.GetInt64();
+            }
+        }
+
+        return new ChatResult(true, text.Trim(), null, promptTokens, completionTokens);
     }
 
     public async Task<EmbedResult> EmbedAsync(AiProvider provider, string serverUrl, string model, string text, CancellationToken cancellationToken)

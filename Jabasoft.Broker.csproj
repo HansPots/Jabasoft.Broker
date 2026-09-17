@@ -11,4 +11,12 @@
     <ProjectReference Include="..\Jabasoft.Base\Jabasoft.Base.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Het tokenverbruik gaat naar de gedeelde tabel TokenUsageEntries in
+         JabasoftBase. Rechtstreeks met SqlClient en niet via Entity
+         Framework: het zijn een INSERT en twee SELECTs op een tabel die al
+         bestaat, dus er valt niets te migreren of te modelleren. -->
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.6" />
+  </ItemGroup>
+
 </Project>
