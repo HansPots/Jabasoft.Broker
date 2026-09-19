@@ -56,5 +56,35 @@ internal sealed class RequestGate(ProviderClient providerClient, IConfiguration 
         }
     }
 
+    /// <summary>
+    /// Hetzelfde wachten op je beurt, maar voor een antwoord dat stukje
+    /// bij beetje binnenkomt: de beurt wordt vastgehouden zolang de
+    /// stroom loopt en pas losgelaten als hij afgelopen is. Zou dat niet
+    /// zo zijn, dan begon een tweede aanroep midden in de eerste en
+    /// krijgen twee vragen tegelijk de lokale server te pakken.
+    /// </summary>
+    public async IAsyncEnumerable<T> RunGatedStreamAsync<T>(
+        AiProvider provider,
+        string serverUrl,
+        Func<IAsyncEnumerable<T>> action,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+
+        var semaphore = _semaphores.GetOrAdd(Key(provider, serverUrl), _ => new SemaphoreSlim(MaxConcurrentPerServer, MaxConcurrentPerServer));
+        await semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            await foreach (var stukje in action().WithCancellation(cancellationToken))
+            {
+                yield return stukje;
+            }
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
     private static string Key(AiProvider provider, string serverUrl) => $"{provider}:{serverUrl.TrimEnd('/')}";
 }

@@ -448,7 +448,8 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
             : new ConnectionTestResult(true, text.Trim());
     }
 
-    private static string CombineUrl(string serverUrl, string path) => serverUrl.TrimEnd('/') + path;
+    /// <summary>Ook gebruikt door ProviderStream: dezelfde adressen, dezelfde manier van plakken.</summary>
+    internal static string CombineUrl(string serverUrl, string path) => serverUrl.TrimEnd('/') + path;
 
     private static string Truncate(string value) => value.Length > 300 ? value[..300] + "…" : value;
 }

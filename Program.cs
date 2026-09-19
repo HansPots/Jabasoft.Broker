@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Jabasoft.Base.AiBroker;
 using Jabasoft.Base.Logging;
@@ -34,6 +35,7 @@ builder.Services.AddSingleton<AiSettingsStore>();
 builder.Services.AddSingleton<TokenUsageStore>();
 
 builder.Services.AddSingleton<ProviderClient>();
+builder.Services.AddSingleton<ProviderStream>();
 builder.Services.AddSingleton<RequestGate>();
 
 var app = builder.Build();
@@ -68,6 +70,14 @@ app.Use(async (context, next) =>
             System.Globalization.CultureInfo.InvariantCulture,
             $"{context.Request.Method} {path} -> {context.Response.StatusCode} ({duur.TotalMilliseconds:0} ms)"));
 });
+
+// De vorm waarin de stukjes van een streamend antwoord over de lijn gaan:
+// dezelfde als van elk ander antwoord van de broker, zodat de client er
+// niets aparts voor hoeft te doen.
+var StreamJson = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+{
+    Converters = { new JsonStringEnumConverter() },
+};
 
 app.MapGet("/health", () => Results.Ok());
 
@@ -129,6 +139,51 @@ app.MapPost("/api/chat", async (ChatRequest request, ProviderClient client, Requ
     }
 
     return Results.Ok(result);
+});
+
+// Hetzelfde gesprek, maar streamend: het antwoord komt stukje bij beetje
+// terug (één JSON-object per regel), zodat een applicatie de tekst kan
+// laten aangroeien en een teller kan laten meelopen. Het wegschrijven van
+// het verbruik gebeurt hier net zo goed - aan het eind, als de server
+// verteld heeft wat het gekost heeft.
+app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream stream, RequestGate gate, TokenUsageStore usage, ActivityLog log, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.ContentType = "application/x-ndjson";
+
+    // Niets bufferen: een stukje dat in een buffer blijft hangen tot het
+    // antwoord af is, is precies wat streamen NIET is.
+    var buffering = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>();
+    buffering?.DisableBuffering();
+
+    long promptTokens = 0;
+    long completionTokens = 0;
+    string? fout = null;
+
+    await foreach (var stukje in gate.RunGatedStreamAsync(
+        request.Provider,
+        request.ServerUrl,
+        () => stream.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, ct),
+        ct))
+    {
+        if (stukje.Done)
+        {
+            promptTokens = stukje.PromptTokens;
+            completionTokens = stukje.CompletionTokens;
+            fout = stukje.ErrorMessage;
+        }
+
+        await context.Response.WriteAsync(JsonSerializer.Serialize(stukje, StreamJson) + "\n", ct);
+        await context.Response.Body.FlushAsync(ct);
+    }
+
+    if (fout is null && (promptTokens > 0 || completionTokens > 0))
+    {
+        await usage.RecordAsync(request.Application, request.Model, promptTokens, completionTokens, ct);
+    }
+
+    log.Add("broker", fout is null
+        ? $"Chat (stromend) met {request.Model}: {promptTokens + completionTokens} tokens"
+        : $"Chat (stromend) met {request.Model} mislukt: {fout}");
 });
 
 app.MapPost("/api/embed", async (EmbedRequest request, ProviderClient client, RequestGate gate, TokenUsageStore usage, CancellationToken ct) =>
