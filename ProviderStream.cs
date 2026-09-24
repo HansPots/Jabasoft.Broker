@@ -427,11 +427,24 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
         }
 
         string? tekst = null;
+        var denkt = false;
 
-        if (wortel.TryGetProperty("message", out var bericht) &&
-            bericht.TryGetProperty("content", out var inhoudElement))
+        if (wortel.TryGetProperty("message", out var bericht))
         {
-            tekst = inhoudElement.GetString();
+            if (bericht.TryGetProperty("content", out var inhoudElement))
+            {
+                tekst = inhoudElement.GetString();
+            }
+
+            // Een redenerend model (Qwen3 en soortgenoten) zet zijn
+            // nadenken in message.thinking, los van de eigenlijke inhoud.
+            // Net als bij LM Studio (reasoning.delta) geven we alleen door DAT
+            // er gedacht wordt, niet wat: de inhoud hoort niet op het scherm,
+            // maar de teller moet wel meelopen - anders staat die stil zolang
+            // het model nadenkt.
+            denkt = bericht.TryGetProperty("thinking", out var denkElement) &&
+                    denkElement.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrEmpty(denkElement.GetString());
         }
 
         var klaar = wortel.TryGetProperty("done", out var doneElement) &&
@@ -440,7 +453,7 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
         long prompt = wortel.TryGetProperty("prompt_eval_count", out var promptElement) ? promptElement.GetInt64() : 0;
         long completion = wortel.TryGetProperty("eval_count", out var evalElement) ? evalElement.GetInt64() : 0;
 
-        return new ChatStreamChunk(tekst, klaar, prompt, completion);
+        return new ChatStreamChunk(tekst, klaar, prompt, completion, Thinking: denkt);
     }
 
     private static string Kort(string tekst) => tekst.Length <= 300 ? tekst : tekst[..300] + "…";
