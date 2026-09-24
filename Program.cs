@@ -1,8 +1,10 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Jabasoft.Ai.Data;
 using Jabasoft.Base.AiBroker;
 using Jabasoft.Base.Logging;
 using Jabasoft.Broker;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -38,7 +40,26 @@ builder.Services.AddSingleton<ProviderClient>();
 builder.Services.AddSingleton<ProviderStream>();
 builder.Services.AddSingleton<RequestGate>();
 
+// De AI-database: JabasoftAi, een eigen database naast JabasoftBase en
+// JabasoftStylebook. AddDbContext (scoped) en niet AddSingleton: een
+// DbContext is niet thread-safe en Minimal API maakt toch al een scope
+// per binnenkomend verzoek, dus dat past precies.
+builder.Services.AddDbContext<AiDbContext>(options => options.UseSqlServer(
+    builder.Configuration.GetConnectionString("JabasoftAi")
+    ?? throw new InvalidOperationException("ConnectionStrings:JabasoftAi ontbreekt in appsettings.json.")));
+
+builder.Services.AddScoped<SearchIndexStore>();
+
 var app = builder.Build();
+
+// De database (en de tabel erin) meteen op orde bij het opstarten - net
+// als Stylebook.Playground bij zijn eigen database doet. Bestaat de
+// database nog niet, dan wordt hij hier aangemaakt; bestaat hij al, dan
+// lopen alleen de migraties bij die nog niet toegepast zijn.
+using (var opstartScope = app.Services.CreateScope())
+{
+    opstartScope.ServiceProvider.GetRequiredService<AiDbContext>().Database.Migrate();
+}
 
 var activity = app.Services.GetRequiredService<ActivityLog>();
 activity.Add("broker", "Broker gestart");
@@ -91,10 +112,33 @@ app.MapGet("/logs", (ActivityLog log, long since = 0) => Results.Ok(log.Since(si
 
 app.MapGet("/api/settings", (AiSettingsStore store) => Results.Ok(store.Current));
 
-app.MapPut("/api/settings", (AiSettings settings, AiSettingsStore store, ActivityLog log) =>
+app.MapPut("/api/settings", (AiSettings settings, AiSettingsStore store, ActivityLog log, IServiceScopeFactory scopes) =>
 {
+    var vorige = store.Current;
     var opgeslagen = store.Save(settings);
     log.Add("broker", $"AI-instelling: {opgeslagen.Provider} op {opgeslagen.ActiveServerUrl}, chat '{opgeslagen.Active.ChatModel}', embedding '{opgeslagen.Active.EmbedModel}'");
+
+    // Wijzigt het embeddingmodel (of de server erachter), dan is elke tot
+    // nu toe geïndexeerde vector niet meer vergelijkbaar met een vraag die
+    // met het NIEUWE model geëmbed wordt - die moeten dus allemaal opnieuw.
+    // Op de achtergrond en met een eigen scope: dit antwoord mag niet
+    // wachten tot alle projecten herindexeerd zijn, en de scope van dit
+    // verzoek is straks weg voordat dat klaar is.
+    if (!string.IsNullOrWhiteSpace(opgeslagen.Active.EmbedModel) &&
+        (opgeslagen.Active.EmbedModel != vorige.Active.EmbedModel || opgeslagen.ActiveServerUrl != vorige.ActiveServerUrl))
+    {
+        var provider = opgeslagen.Provider;
+        var serverUrl = opgeslagen.ActiveServerUrl;
+        var model = opgeslagen.Active.EmbedModel;
+
+        _ = Task.Run(async () =>
+        {
+            using var scope = scopes.CreateScope();
+            var index = scope.ServiceProvider.GetRequiredService<SearchIndexStore>();
+            await index.ReindexAllAsync(provider, serverUrl, model, CancellationToken.None);
+        });
+    }
+
     return Results.Ok(opgeslagen);
 });
 
@@ -220,5 +264,16 @@ app.MapGet("/api/usage/models", async (TokenUsageStore usage, CancellationToken 
 // De losse regels van één week - pas opgehaald als je die week openklapt.
 app.MapGet("/api/usage/entries", async (string week, TokenUsageStore usage, CancellationToken ct) =>
     Results.Ok(await usage.GetEntriesAsync(week, ct)));
+
+// --- Zoekindex (semantisch zoeken) ---------------------------------------
+// Keyword search heeft de broker niet nodig - dat gaat rechtstreeks over de
+// bestanden op schijf. Deze twee zijn voor de vector-kant: indexeren en
+// erin zoeken. Zie SearchIndexStore voor waarom het vector als tekst
+// bewaard wordt in plaats van met het native VECTOR-type.
+app.MapPost("/api/search/index", async (SearchIndexRequest request, SearchIndexStore index, CancellationToken ct) =>
+    Results.Ok(await index.IndexAsync(request, ct)));
+
+app.MapPost("/api/search/semantic", async (SemanticSearchRequest request, SearchIndexStore index, CancellationToken ct) =>
+    Results.Ok(await index.SearchAsync(request, ct)));
 
 app.Run();

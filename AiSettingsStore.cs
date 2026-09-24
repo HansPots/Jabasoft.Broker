@@ -86,11 +86,14 @@ public sealed class AiSettingsStore
         }
     }
 
-    /// <summary>Lege of rommelige adressen terug naar de standaardpoort, en spaties eraf.</summary>
+    /// <summary>Lege of rommelige adressen terug naar de standaardpoort, spaties eraf, de ondergrens binnen 0-1, het aantal contextronden binnen 0-5, en de wachttijd binnen 1-60 minuten.</summary>
     private static AiSettings Normaliseer(AiSettings settings) => settings with
     {
         LmStudio = Normaliseer(settings.LmStudio, AiSettings.DefaultLmStudioUrl),
         Ollama = Normaliseer(settings.Ollama, AiSettings.DefaultOllamaUrl),
+        MinimumSemanticScore = Math.Clamp(settings.MinimumSemanticScore, 0, 1),
+        MaxContextRondes = Math.Clamp(settings.MaxContextRondes, 0, 5),
+        ChatTimeoutSeconden = Math.Clamp(settings.ChatTimeoutSeconden, 60, 3600),
     };
 
     /// <summary>
@@ -102,7 +105,7 @@ public sealed class AiSettingsStore
     {
         if (server is null)
         {
-            return new AiServerSettings(standaardUrl, string.Empty, string.Empty);
+            return new AiServerSettings(standaardUrl, string.Empty, string.Empty, string.Empty, string.Empty);
         }
 
         var url = server.Url?.Trim();
@@ -112,6 +115,8 @@ public sealed class AiSettingsStore
             Url = string.IsNullOrWhiteSpace(url) ? standaardUrl : url,
             ChatModel = server.ChatModel?.Trim() ?? string.Empty,
             EmbedModel = server.EmbedModel?.Trim() ?? string.Empty,
+            CodeModel = server.CodeModel?.Trim() ?? string.Empty,
+            ControleModel = server.ControleModel?.Trim() ?? string.Empty,
         };
     }
 

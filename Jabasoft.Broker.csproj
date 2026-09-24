@@ -9,6 +9,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Jabasoft.Base\Jabasoft.Base.csproj" />
+
+    <!-- De AI-database (JabasoftAi): de zoekindex voor semantisch zoeken.
+         Wel via Entity Framework, in tegenstelling tot TokenUsageEntries
+         hierboven - dit is een tabel die WIJ modelleren en die kan blijven
+         evolueren (zie Jabasoft.Ai.Data.Entities.SearchDocument), dus
+         migraties zijn hier de goede investering. -->
+    <ProjectReference Include="..\Jabasoft.Base\Jabasoft.Ai.Data\Jabasoft.Ai.Data.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -17,6 +24,8 @@
          Framework: het zijn een INSERT en twee SELECTs op een tabel die al
          bestaat, dus er valt niets te migreren of te modelleren. -->
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.6" />
+
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.11" />
   </ItemGroup>
 
 </Project>

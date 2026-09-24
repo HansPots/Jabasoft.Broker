@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using Jabasoft.Base.AiBroker;
 
@@ -65,31 +66,99 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
         double? temperature,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        // LM Studio's EIGEN api (/api/v1/chat) is nodig voor het percentage
+        // tijdens het inlezen van de prompt (zie ChatStreamChunk.PromptProgress) -
+        // de OpenAI-compatibele /v1/chat/completions geeft dat niet, geverifieerd
+        // rechtstreeks tegen een draaiende server. Maar deze api kent geen losse
+        // rol-berichten zoals messages[]: "input" is één tekst (of tekst/
+        // afbeelding-stukken zonder rol), en geschiedenis onthoudt de SERVER zelf
+        // via een response_id in plaats van dat je hem meestuurt - ook getest,
+        // en niet hoe deze familie werkt (elke aanroep stuurt zelf de volledige
+        // context mee, zie Projectassistent/_verloop). Vandaar PlatSlaan
+        // hieronder: het systeembericht blijft apart (system_prompt bestaat wel),
+        // de rest (bestanden, eerdere beurten, de vraag) wordt plat tot gewone
+        // tekst met de rol als kopje erboven - zelfde volledige-context-per-
+        // aanroep als altijd, alleen anders verpakt. Geverifieerd dat het model
+        // zo'n platgeslagen geschiedenis nog gewoon volgt (zie het testgesprek
+        // met "Piet" tijdens het bouwen hiervan).
+        var (systeemPrompt, invoer) = PlatSlaan(messages);
+
         var payload = new Dictionary<string, object>
         {
             ["model"] = model,
-            ["messages"] = messages.Select(m => new { role = m.Role, content = m.Content }),
+            ["input"] = invoer,
             ["stream"] = true,
-            // Zonder dit stuurt LM Studio bij een stream helemaal geen
-            // tokenaantallen, en dan valt er achteraf niets te boeken.
-            ["stream_options"] = new { include_usage = true },
         };
+
+        if (systeemPrompt is not null)
+        {
+            payload["system_prompt"] = systeemPrompt;
+        }
 
         if (temperature.HasValue)
         {
             payload["temperature"] = temperature.Value;
         }
 
+        string? huidigEvent = null;
+
+        ChatStreamChunk? LeesRegel(string regel)
+        {
+            if (regel.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+            {
+                huidigEvent = regel[6..].Trim();
+                return null;
+            }
+
+            if (!regel.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var inhoud = regel[5..].Trim();
+            var soort = huidigEvent;
+            huidigEvent = null;
+
+            return inhoud.Length == 0 || soort is null ? null : LeesLmStudioEvent(soort, inhoud);
+        }
+
         await foreach (var stukje in LeesAsync(
             client,
-            ProviderClient.CombineUrl(serverUrl, "/v1/chat/completions"),
+            ProviderClient.CombineUrl(serverUrl, "/api/v1/chat"),
             payload,
             "LM Studio",
-            LeesLmStudioRegel,
+            LeesRegel,
             cancellationToken))
         {
             yield return stukje;
         }
+    }
+
+    /// <summary>
+    /// Splitst de berichtenlijst in het systeembericht (los, want dat kent
+    /// /api/v1/chat wél als system_prompt) en de rest, plat geslagen tot één
+    /// tekst met de rol als kopje - zie de toelichting bij LmStudioAsync voor
+    /// waarom dit nodig is en wat er niet meer klopt (geen chat-template-
+    /// rolmarkering per beurt meer, alleen platte tekst).
+    /// </summary>
+    private static (string? SysteemPrompt, string Invoer) PlatSlaan(IReadOnlyList<ChatMessage> messages)
+    {
+        var systeem = messages.Where(m => m.Role == "system").Select(m => m.Content).ToList();
+        var rest = messages.Where(m => m.Role != "system").ToList();
+
+        var invoer = new StringBuilder();
+
+        foreach (var bericht in rest)
+        {
+            if (invoer.Length > 0)
+            {
+                invoer.Append("\n\n");
+            }
+
+            invoer.Append(bericht.Role.ToUpperInvariant()).Append(":\n").Append(bericht.Content);
+        }
+
+        return (systeem.Count > 0 ? string.Join("\n\n", systeem) : null, invoer.ToString());
     }
 
     private static async IAsyncEnumerable<ChatStreamChunk> OllamaAsync(
@@ -255,6 +324,10 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
                 {
                     yield return new ChatStreamChunk(Thinking: true);
                 }
+                else if (stukje.PromptProgress.HasValue)
+                {
+                    yield return new ChatStreamChunk(PromptProgress: stukje.PromptProgress);
+                }
 
                 if (stukje.Done)
                 {
@@ -273,82 +346,69 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
     }
 
     /// <summary>
-    /// Het OpenAI-formaat: regels beginnen met "data: ", en "[DONE]" sluit
-    /// af. De tekst zit in choices[0].delta.content; het allerlaatste
-    /// stukje heeft geen choices maar wel usage.
+    /// LM Studio's eigen (niet-OpenAI) formaat: elk "event: soort" hoort bij de
+    /// "data: {...}" die erna komt (zie LmStudioAsync, dat de twee regels aan
+    /// elkaar plakt). Onbekende/oninteressante soorten (chat.start,
+    /// model_load.*, prompt_processing.start/end, message.start/end,
+    /// tool_call.*) leveren niets op - alleen de vier hieronder doen iets met
+    /// het scherm.
+    ///
+    /// Geverifieerd tegen een echt draaiende LM Studio-server (niet alleen
+    /// tegen de documentatie) - zie het testgesprek dat bij het bouwen hiervan
+    /// gevoerd is: message.delta.content, chat.end.result.stats.input_tokens/
+    /// total_output_tokens en prompt_processing.progress.progress kloppen zo.
     /// </summary>
-    private static ChatStreamChunk? LeesLmStudioRegel(string regel)
+    private static ChatStreamChunk? LeesLmStudioEvent(string soort, string inhoud)
     {
-        if (!regel.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        var inhoud = regel[5..].Trim();
-
-        if (inhoud.Length == 0)
-        {
-            return null;
-        }
-
-        if (inhoud == "[DONE]")
-        {
-            return new ChatStreamChunk(Done: true);
-        }
-
         using var document = JsonDocument.Parse(inhoud);
         var wortel = document.RootElement;
 
-        if (wortel.TryGetProperty("error", out var foutElement))
+        switch (soort)
         {
-            var melding = foutElement.TryGetProperty("message", out var meldingElement)
-                ? meldingElement.GetString()
-                : foutElement.ToString();
-            return new ChatStreamChunk(ErrorMessage: $"LM Studio error: {melding}");
+            case "error":
+            {
+                var melding = wortel.TryGetProperty("error", out var foutElement)
+                    ? (foutElement.TryGetProperty("message", out var meldingElement) ? meldingElement.GetString() : foutElement.ToString())
+                    : "unknown error";
+                return new ChatStreamChunk(ErrorMessage: $"LM Studio error: {melding}");
+            }
+
+            // Het percentage waar dit allemaal om begonnen is - hoe ver het
+            // inlezen van de prompt is, vóór het model met antwoorden begint.
+            case "prompt_processing.progress":
+                return wortel.TryGetProperty("progress", out var voortgangElement) && voortgangElement.ValueKind == JsonValueKind.Number
+                    ? new ChatStreamChunk(PromptProgress: voortgangElement.GetDouble())
+                    : null;
+
+            case "message.delta":
+            {
+                var tekst = wortel.TryGetProperty("content", out var inhoudElement) && inhoudElement.ValueKind == JsonValueKind.String
+                    ? inhoudElement.GetString()
+                    : null;
+                return string.IsNullOrEmpty(tekst) ? null : new ChatStreamChunk(tekst);
+            }
+
+            // Een redenerend model (Qwen3 en soortgenoten) - net als bij Ollama/de
+            // oude OpenAI-vorm geven we alleen door DAT er gedacht wordt, niet de
+            // inhoud: die hoort niet op het scherm.
+            case "reasoning.delta":
+                return new ChatStreamChunk(Thinking: true);
+
+            case "chat.end":
+            {
+                if (!wortel.TryGetProperty("result", out var resultaat) || !resultaat.TryGetProperty("stats", out var stats))
+                {
+                    return new ChatStreamChunk(Done: true);
+                }
+
+                var prompt = stats.TryGetProperty("input_tokens", out var promptElement) ? promptElement.GetInt64() : 0;
+                var completion = stats.TryGetProperty("total_output_tokens", out var completionElement) ? completionElement.GetInt64() : 0;
+                return new ChatStreamChunk(Done: true, PromptTokens: prompt, CompletionTokens: completion);
+            }
+
+            default:
+                return null;
         }
-
-        string? tekst = null;
-        var denkt = false;
-
-        if (wortel.TryGetProperty("choices", out var keuzes) && keuzes.GetArrayLength() > 0 &&
-            keuzes[0].TryGetProperty("delta", out var delta))
-        {
-            if (delta.TryGetProperty("content", out var inhoudElement) &&
-                inhoudElement.ValueKind == JsonValueKind.String)
-            {
-                tekst = inhoudElement.GetString();
-            }
-
-            // Een redenerend model (Qwen3 en soortgenoten) stuurt zijn
-            // overweging in een APART veld, niet in content. Die tekst
-            // hoort niet op het scherm, maar het is wel het enige teken
-            // dat er gewerkt wordt - soms tientallen seconden lang. Dus
-            // geven we door DAT er gedacht wordt, zonder wat.
-            if (delta.TryGetProperty("reasoning_content", out var denkElement) &&
-                denkElement.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrEmpty(denkElement.GetString()))
-            {
-                denkt = true;
-            }
-        }
-
-        long prompt = 0;
-        long completion = 0;
-
-        if (wortel.TryGetProperty("usage", out var verbruik) && verbruik.ValueKind == JsonValueKind.Object)
-        {
-            if (verbruik.TryGetProperty("prompt_tokens", out var promptElement))
-            {
-                prompt = promptElement.GetInt64();
-            }
-
-            if (verbruik.TryGetProperty("completion_tokens", out var completionElement))
-            {
-                completion = completionElement.GetInt64();
-            }
-        }
-
-        return new ChatStreamChunk(tekst, PromptTokens: prompt, CompletionTokens: completion, Thinking: denkt);
     }
 
     /// <summary>
