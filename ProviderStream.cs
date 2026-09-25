@@ -141,7 +141,7 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
     /// waarom dit nodig is en wat er niet meer klopt (geen chat-template-
     /// rolmarkering per beurt meer, alleen platte tekst).
     /// </summary>
-    private static (string? SysteemPrompt, string Invoer) PlatSlaan(IReadOnlyList<ChatMessage> messages)
+    private static (string? SysteemPrompt, object Invoer) PlatSlaan(IReadOnlyList<ChatMessage> messages)
     {
         var systeem = messages.Where(m => m.Role == "system").Select(m => m.Content).ToList();
         var rest = messages.Where(m => m.Role != "system").ToList();
@@ -158,7 +158,21 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
             invoer.Append(bericht.Role.ToUpperInvariant()).Append(":\n").Append(bericht.Content);
         }
 
-        return (systeem.Count > 0 ? string.Join("\n\n", systeem) : null, invoer.ToString());
+        var systeemPrompt = systeem.Count > 0 ? string.Join("\n\n", systeem) : null;
+
+        // Met afbeeldingen wordt "input" een lijst stukken: eerst de tekst,
+        // dan elke afbeelding als data-url (het formaat van /api/v1/chat).
+        var afbeeldingen = rest.SelectMany(m => m.Images ?? []).ToList();
+
+        if (afbeeldingen.Count == 0)
+        {
+            return (systeemPrompt, invoer.ToString());
+        }
+
+        var stukken = new List<object> { new { type = "text", content = invoer.ToString() } };
+        stukken.AddRange(afbeeldingen.Select(b64 => (object)new { type = "image", data_url = $"data:image/png;base64,{b64}" }));
+
+        return (systeemPrompt, stukken);
     }
 
     private static async IAsyncEnumerable<ChatStreamChunk> OllamaAsync(
@@ -172,7 +186,9 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
         var payload = new Dictionary<string, object>
         {
             ["model"] = model,
-            ["messages"] = messages.Select(m => new { role = m.Role, content = m.Content }),
+            ["messages"] = messages.Select(m => m.Images is { Count: > 0 }
+                ? (object)new { role = m.Role, content = m.Content, images = m.Images }
+                : new { role = m.Role, content = m.Content }),
             ["stream"] = true,
         };
 

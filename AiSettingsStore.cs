@@ -117,6 +117,7 @@ public sealed class AiSettingsStore
             EmbedModel = server.EmbedModel?.Trim() ?? string.Empty,
             CodeModel = server.CodeModel?.Trim() ?? string.Empty,
             ControleModel = server.ControleModel?.Trim() ?? string.Empty,
+            BeeldModel = server.BeeldModel?.Trim() ?? string.Empty,
         };
     }
 
