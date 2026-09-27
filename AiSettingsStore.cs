@@ -129,7 +129,26 @@ public sealed class AiSettingsStore
             BeeldModel = server.BeeldModel?.Trim() ?? string.Empty,
             Sterren = NormaliseerGetallen(server.Sterren, 0, 5),
             MaxDenktijdSeconden = NormaliseerGetallen(server.MaxDenktijdSeconden, 0, 3600),
+            Omschrijvingen = NormaliseerOmschrijvingen(server.Omschrijvingen),
         };
+    }
+
+    /// <summary>Lege modelnamen en lege/te lange notities eruit; een lege lijst wordt null.</summary>
+    private static IReadOnlyDictionary<string, string>? NormaliseerOmschrijvingen(IReadOnlyDictionary<string, string>? waarden)
+    {
+        if (waarden is null)
+        {
+            return null;
+        }
+
+        var schoon = waarden
+            .Where(paar => !string.IsNullOrWhiteSpace(paar.Key) && !string.IsNullOrWhiteSpace(paar.Value))
+            .ToDictionary(
+                paar => paar.Key.Trim(),
+                paar => paar.Value.Trim().Length > 2000 ? paar.Value.Trim()[..2000] : paar.Value.Trim(),
+                StringComparer.OrdinalIgnoreCase);
+
+        return schoon.Count > 0 ? schoon : null;
     }
 
     /// <summary>
