@@ -67,7 +67,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
                 continue;
             }
 
-            await usage.RecordAsync(request.Application, request.Model, resultaat.TokensUsed, 0, cancellationToken);
+            await usage.RecordAsync(request.Application, request.Model, resultaat.TokensUsed, 0, "Indexeren", cancellationToken);
 
             var bewaardeTekst = bestand.Content.Length > MaxBewaardeTekst
                 ? bestand.Content[..MaxBewaardeTekst]
@@ -151,7 +151,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
                 continue;
             }
 
-            await usage.RecordAsync("Broker", model, resultaat.TokensUsed, 0, cancellationToken);
+            await usage.RecordAsync("Broker", model, resultaat.TokensUsed, 0, "Indexeren", cancellationToken);
 
             document.Model = model;
             document.Embedding = JsonSerializer.Serialize(resultaat.Vector);
@@ -195,7 +195,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
             return new SemanticSearchResult(false, [], vraag.ErrorMessage);
         }
 
-        await usage.RecordAsync(request.Application, request.Model, vraag.TokensUsed, 0, cancellationToken);
+        await usage.RecordAsync(request.Application, request.Model, vraag.TokensUsed, 0, "Zoeken", cancellationToken);
 
         var documenten = await db.SearchDocuments
             .Where(d => d.Project == request.Project)

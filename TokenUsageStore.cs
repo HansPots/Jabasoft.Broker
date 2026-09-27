@@ -59,8 +59,30 @@ public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog lo
         }
     }
 
+    /// <summary>
+    /// Is de kolom Onderdeel al aan de tabel toegevoegd (zie
+    /// Sql/001-TokenUsageEntries-Onderdeel.sql)? Zolang dat nog niet zo is,
+    /// werkt alles zoals voorheen - alleen zonder onderdeel. Een "ja" wordt
+    /// onthouden; een "nee" wordt bij de volgende aanroep opnieuw gecontroleerd,
+    /// zodat het script draaien meteen effect heeft.
+    /// </summary>
+    private async Task<bool> HeeftOnderdeelKolomAsync(SqlConnection verbinding, CancellationToken cancellationToken)
+    {
+        if (_heeftOnderdeel)
+        {
+            return true;
+        }
+
+        await using var opdracht = new SqlCommand("SELECT COL_LENGTH('dbo.TokenUsageEntries', 'Onderdeel')", verbinding);
+        var lengte = await opdracht.ExecuteScalarAsync(cancellationToken);
+        _heeftOnderdeel = lengte is not null and not DBNull;
+        return _heeftOnderdeel;
+    }
+
+    private volatile bool _heeftOnderdeel;
+
     /// <summary>Legt een aanroep vast. Faalt dit, dan komt het in het activiteitenlog en gaat de aanroep gewoon door.</summary>
-    public async Task RecordAsync(string application, string? model, long promptTokens, long completionTokens, CancellationToken cancellationToken)
+    public async Task RecordAsync(string application, string? model, long promptTokens, long completionTokens, string? onderdeel, CancellationToken cancellationToken)
     {
         // Niets te melden: een aanroep zonder tokens (mislukt, of een server
         // die geen aantallen teruggeeft) levert geen bruikbare regel op.
@@ -74,13 +96,22 @@ public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog lo
             await using var verbinding = new SqlConnection(ConnectionString);
             await verbinding.OpenAsync(cancellationToken);
 
+            var metOnderdeel = await HeeftOnderdeelKolomAsync(verbinding, cancellationToken);
+
             await using var opdracht = new SqlCommand(
-                """
-                INSERT INTO dbo.TokenUsageEntries
-                    (Id, Application, Timestamp, Model, PromptTokens, CompletionTokens, TotalTokens)
-                VALUES
-                    (@id, @application, @timestamp, @model, @prompt, @completion, @total)
-                """,
+                metOnderdeel
+                    ? """
+                      INSERT INTO dbo.TokenUsageEntries
+                          (Id, Application, Timestamp, Model, PromptTokens, CompletionTokens, TotalTokens, Onderdeel)
+                      VALUES
+                          (@id, @application, @timestamp, @model, @prompt, @completion, @total, @onderdeel)
+                      """
+                    : """
+                      INSERT INTO dbo.TokenUsageEntries
+                          (Id, Application, Timestamp, Model, PromptTokens, CompletionTokens, TotalTokens)
+                      VALUES
+                          (@id, @application, @timestamp, @model, @prompt, @completion, @total)
+                      """,
                 verbinding);
 
             opdracht.Parameters.Add("@id", SqlDbType.UniqueIdentifier).Value = Guid.NewGuid();
@@ -91,6 +122,12 @@ public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog lo
             opdracht.Parameters.Add("@prompt", SqlDbType.BigInt).Value = promptTokens;
             opdracht.Parameters.Add("@completion", SqlDbType.BigInt).Value = completionTokens;
             opdracht.Parameters.Add("@total", SqlDbType.BigInt).Value = promptTokens + completionTokens;
+
+            if (metOnderdeel)
+            {
+                opdracht.Parameters.Add("@onderdeel", SqlDbType.NVarChar, 100).Value =
+                    string.IsNullOrWhiteSpace(onderdeel) ? DBNull.Value : onderdeel;
+            }
 
             await opdracht.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -150,6 +187,23 @@ public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog lo
             .ToList();
     }
 
+    /// <summary>
+    /// Het verbruik per onderdeel over de laatste <paramref name="dagen"/>
+    /// dagen, het zwaarste eerst. Regels zonder onderdeel (van voor de
+    /// kolom bestond) staan onder "—".
+    /// </summary>
+    public async Task<IReadOnlyList<TokenUsageOnderdeel>> GetOnderdelenAsync(int dagen, CancellationToken cancellationToken)
+    {
+        var vanaf = DateTime.Today.AddDays(-(Math.Clamp(dagen, 1, 3650) - 1));
+        var regels = await LeesAsync(vanaf, DateTime.Today.AddDays(1), cancellationToken);
+
+        return regels
+            .GroupBy(regel => (regel.Application, Onderdeel: string.IsNullOrWhiteSpace(regel.Onderdeel) ? "—" : regel.Onderdeel!))
+            .Select(groep => new TokenUsageOnderdeel(groep.Key.Application, groep.Key.Onderdeel, groep.Sum(r => r.TotalTokens), groep.Count()))
+            .OrderByDescending(onderdeel => onderdeel.TotalTokens)
+            .ToList();
+    }
+
     /// <summary>De losse regels van één week, nieuwste eerst.</summary>
     public async Task<IReadOnlyList<TokenUsageEntry>> GetEntriesAsync(string week, CancellationToken cancellationToken)
     {
@@ -168,22 +222,26 @@ public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog lo
     {
         var regels = new List<TokenUsageEntry>();
 
-        var sql = """
-            SELECT Id, Application, Timestamp, Model, PromptTokens, CompletionTokens, TotalTokens
-            FROM dbo.TokenUsageEntries
-            """;
-
-        if (vanaf is not null)
-        {
-            sql += " WHERE Timestamp >= @vanaf AND Timestamp < @tot";
-        }
-
-        sql += " ORDER BY Timestamp";
-
         try
         {
             await using var verbinding = new SqlConnection(ConnectionString);
             await verbinding.OpenAsync(cancellationToken);
+
+            // Zonder de kolom (script nog niet gedraaid) komt Onderdeel als leeg terug.
+            var metOnderdeel = await HeeftOnderdeelKolomAsync(verbinding, cancellationToken);
+
+            var sql = $"""
+                SELECT Id, Application, Timestamp, Model, PromptTokens, CompletionTokens, TotalTokens,
+                       {(metOnderdeel ? "Onderdeel" : "CAST(NULL AS NVARCHAR(100))")} AS Onderdeel
+                FROM dbo.TokenUsageEntries
+                """;
+
+            if (vanaf is not null)
+            {
+                sql += " WHERE Timestamp >= @vanaf AND Timestamp < @tot";
+            }
+
+            sql += " ORDER BY Timestamp";
 
             await using var opdracht = new SqlCommand(sql, verbinding);
             if (vanaf is not null)
@@ -202,7 +260,8 @@ public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog lo
                     lezer.IsDBNull(3) ? null : lezer.GetString(3),
                     lezer.GetInt64(4),
                     lezer.GetInt64(5),
-                    lezer.GetInt64(6)));
+                    lezer.GetInt64(6),
+                    lezer.IsDBNull(7) ? null : lezer.GetString(7)));
             }
         }
         catch (Exception ex)

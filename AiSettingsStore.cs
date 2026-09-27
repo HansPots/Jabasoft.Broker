@@ -57,6 +57,15 @@ public sealed class AiSettingsStore
     }
 
     /// <summary>
+    /// De ingestelde maximale denktijd (seconden) voor dit model bij deze
+    /// serversoort, of 0 als er geen apart limiet staat - zie
+    /// AiServerSettings.DenktijdVoor. Gebruikt door de /api/chat/stream-
+    /// route om een model dat te lang hardop denkt af te breken.
+    /// </summary>
+    public int MaxDenktijd(AiProvider provider, string model) =>
+        (provider == AiProvider.Ollama ? Current.Ollama : Current.LmStudio).DenktijdVoor(model);
+
+    /// <summary>
     /// Slaat een nieuwe instelling op en geeft terug wat er daadwerkelijk
     /// is neergezet - dat kan afwijken van wat er binnenkwam, want lege
     /// adressen worden vervangen door de standaardpoort van die soort.
@@ -118,7 +127,27 @@ public sealed class AiSettingsStore
             CodeModel = server.CodeModel?.Trim() ?? string.Empty,
             ControleModel = server.ControleModel?.Trim() ?? string.Empty,
             BeeldModel = server.BeeldModel?.Trim() ?? string.Empty,
+            Sterren = NormaliseerGetallen(server.Sterren, 0, 5),
+            MaxDenktijdSeconden = NormaliseerGetallen(server.MaxDenktijdSeconden, 0, 3600),
         };
+    }
+
+    /// <summary>
+    /// Lege modelnamen en waarden buiten bereik eruit; een lege lijst wordt
+    /// null, zodat een verse installatie geen leeg blokje in ai.json krijgt.
+    /// </summary>
+    private static IReadOnlyDictionary<string, int>? NormaliseerGetallen(IReadOnlyDictionary<string, int>? waarden, int min, int max)
+    {
+        if (waarden is null)
+        {
+            return null;
+        }
+
+        var schoon = waarden
+            .Where(paar => !string.IsNullOrWhiteSpace(paar.Key))
+            .ToDictionary(paar => paar.Key.Trim(), paar => Math.Clamp(paar.Value, min, max), StringComparer.OrdinalIgnoreCase);
+
+        return schoon.Count > 0 ? schoon : null;
     }
 
     private AiSettings Lees()

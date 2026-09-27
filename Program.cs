@@ -179,7 +179,7 @@ app.MapPost("/api/chat", async (ChatRequest request, ProviderClient client, Requ
     // TokenUsageStore.
     if (result.Success)
     {
-        await usage.RecordAsync(request.Application, request.Model, result.PromptTokens, result.CompletionTokens, ct);
+        await usage.RecordAsync(request.Application, request.Model, result.PromptTokens, result.CompletionTokens, request.Onderdeel, ct);
     }
 
     return Results.Ok(result);
@@ -190,7 +190,7 @@ app.MapPost("/api/chat", async (ChatRequest request, ProviderClient client, Requ
 // laten aangroeien en een teller kan laten meelopen. Het wegschrijven van
 // het verbruik gebeurt hier net zo goed - aan het eind, als de server
 // verteld heeft wat het gekost heeft.
-app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream stream, RequestGate gate, TokenUsageStore usage, ActivityLog log, HttpContext context, CancellationToken ct) =>
+app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream stream, RequestGate gate, TokenUsageStore usage, ActivityLog log, AiSettingsStore settings, HttpContext context, CancellationToken ct) =>
 {
     context.Response.ContentType = "application/x-ndjson";
 
@@ -203,26 +203,69 @@ app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream strea
     long completionTokens = 0;
     string? fout = null;
 
-    await foreach (var stukje in gate.RunGatedStreamAsync(
-        request.Provider,
-        request.ServerUrl,
-        () => stream.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, ct),
-        ct))
-    {
-        if (stukje.Done)
-        {
-            promptTokens = stukje.PromptTokens;
-            completionTokens = stukje.CompletionTokens;
-            fout = stukje.ErrorMessage;
-        }
+    // Staat er bij dit model een maximale denktijd ingesteld (Jabasoft, AI-
+    // instellingen), dan breekt de broker het antwoord af zolang het model
+    // nog AAN HET DENKEN is (thinking-stukjes, nog geen echte tekst) en die
+    // tijd verstreken is - zo blijft een klein model niet minutenlang malen.
+    // Zodra er echte tekst binnenkomt, telt de limiet niet meer mee: dat is
+    // gewoon de normale ChatTimeoutSeconden.
+    var maxDenktijd = settings.MaxDenktijd(request.Provider, request.Model);
+    using var denktijdBewaking = maxDenktijd > 0 ? new CancellationTokenSource() : null;
+    using var gekoppeld = denktijdBewaking is null
+        ? null
+        : CancellationTokenSource.CreateLinkedTokenSource(ct, denktijdBewaking.Token);
+    var aanroepToken = gekoppeld?.Token ?? ct;
 
-        await context.Response.WriteAsync(JsonSerializer.Serialize(stukje, StreamJson) + "\n", ct);
+    var begin = DateTime.UtcNow;
+    var echteTekstGezien = false;
+    string? teLangNagedacht = null;
+
+    try
+    {
+        await foreach (var stukje in gate.RunGatedStreamAsync(
+            request.Provider,
+            request.ServerUrl,
+            () => stream.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, aanroepToken),
+            aanroepToken))
+        {
+            if (!echteTekstGezien && !string.IsNullOrEmpty(stukje.Text))
+            {
+                echteTekstGezien = true;
+            }
+
+            if (!echteTekstGezien && maxDenktijd > 0 && (DateTime.UtcNow - begin).TotalSeconds > maxDenktijd)
+            {
+                teLangNagedacht = $"{request.Model} dacht langer na dan de ingestelde {maxDenktijd} s - antwoord afgebroken.";
+                denktijdBewaking!.Cancel();
+                break;
+            }
+
+            if (stukje.Done)
+            {
+                promptTokens = stukje.PromptTokens;
+                completionTokens = stukje.CompletionTokens;
+                fout = stukje.ErrorMessage;
+            }
+
+            await context.Response.WriteAsync(JsonSerializer.Serialize(stukje, StreamJson) + "\n", ct);
+            await context.Response.Body.FlushAsync(ct);
+        }
+    }
+    catch (OperationCanceledException) when (teLangNagedacht is not null)
+    {
+        // Verwacht: dit is onze EIGEN afbreking hierboven, geen echte annulering.
+    }
+
+    if (teLangNagedacht is not null)
+    {
+        fout = teLangNagedacht;
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new ChatStreamChunk(Done: true, ErrorMessage: teLangNagedacht), StreamJson) + "\n", ct);
         await context.Response.Body.FlushAsync(ct);
     }
 
     if (fout is null && (promptTokens > 0 || completionTokens > 0))
     {
-        await usage.RecordAsync(request.Application, request.Model, promptTokens, completionTokens, ct);
+        await usage.RecordAsync(request.Application, request.Model, promptTokens, completionTokens, request.Onderdeel, ct);
     }
 
     log.Add("broker", fout is null
@@ -241,7 +284,7 @@ app.MapPost("/api/embed", async (EmbedRequest request, ProviderClient client, Re
     // Een embedding kent geen antwoordtokens - alles zit aan de promptkant.
     if (result.Success)
     {
-        await usage.RecordAsync(request.Application, request.Model, result.TokensUsed, 0, ct);
+        await usage.RecordAsync(request.Application, request.Model, result.TokensUsed, 0, request.Onderdeel, ct);
     }
 
     return Results.Ok(result);
@@ -260,6 +303,10 @@ app.MapGet("/api/usage/weeks", async (TokenUsageStore usage, CancellationToken c
 // Het totaal per model, zwaarste eerst - voor het tokenblok in de header.
 app.MapGet("/api/usage/models", async (TokenUsageStore usage, CancellationToken ct) =>
     Results.Ok(await usage.GetModelsAsync(ct)));
+
+// Het verbruik per onderdeel van een applicatie over de laatste N dagen.
+app.MapGet("/api/usage/onderdelen", async (int dagen, TokenUsageStore usage, CancellationToken ct) =>
+    Results.Ok(await usage.GetOnderdelenAsync(dagen, ct)));
 
 // De losse regels van één week - pas opgehaald als je die week openklapt.
 app.MapGet("/api/usage/entries", async (string week, TokenUsageStore usage, CancellationToken ct) =>
