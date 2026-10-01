@@ -59,10 +59,9 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
             ["stream"] = false,
         };
 
-        if (temperature.HasValue)
-        {
-            payload["options"] = new { temperature = temperature.Value };
-        }
+        payload["options"] = temperature.HasValue
+            ? new { num_ctx = OllamaDefaults.ContextLength, temperature = temperature.Value }
+            : new { num_ctx = OllamaDefaults.ContextLength };
 
         using var response = await client.PostAsJsonAsync(CombineUrl(serverUrl, "/api/chat"), payload, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);

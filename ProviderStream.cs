@@ -192,10 +192,9 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
             ["stream"] = true,
         };
 
-        if (temperature.HasValue)
-        {
-            payload["options"] = new { temperature = temperature.Value };
-        }
+        payload["options"] = temperature.HasValue
+            ? new { num_ctx = OllamaDefaults.ContextLength, temperature = temperature.Value }
+            : new { num_ctx = OllamaDefaults.ContextLength };
 
         await foreach (var stukje in LeesAsync(
             client,
