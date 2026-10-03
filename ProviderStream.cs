@@ -122,15 +122,43 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
             return inhoud.Length == 0 || soort is null ? null : LeesLmStudioEvent(soort, inhoud);
         }
 
-        await foreach (var stukje in LeesAsync(
-            client,
-            ProviderClient.CombineUrl(serverUrl, "/api/v1/chat"),
-            payload,
-            "LM Studio",
-            LeesRegel,
-            cancellationToken))
+        // Eerst zorgen dat het model met een passende context geladen staat (LM Studio legt die bij het laden vast, zie
+        // LmStudioContext), en bij een antwoord zonder zichtbare tekst opnieuw met een groter venster. Is er al tekst
+        // doorgegeven, dan niet meer: die zou dubbel komen.
+        var stappen = OllamaDefaults.StappenVanaf(OllamaDefaults.BeginContext(messages, model));
+
+        for (var i = 0; i < stappen.Count; i++)
         {
-            yield return stukje;
+            var beheerd = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            var zagTekst = false;
+            var opnieuw = false;
+
+            await foreach (var stukje in LeesAsync(
+                client,
+                ProviderClient.CombineUrl(serverUrl, "/api/v1/chat"),
+                payload,
+                "LM Studio",
+                LeesRegel,
+                cancellationToken))
+            {
+                if (!string.IsNullOrEmpty(stukje.Text))
+                {
+                    zagTekst = true;
+                }
+
+                if (beheerd && stukje.Done && !zagTekst && stukje.ErrorMessage is null && i < stappen.Count - 1)
+                {
+                    opnieuw = true;
+                    break;
+                }
+
+                yield return stukje;
+            }
+
+            if (!opnieuw)
+            {
+                yield break;
+            }
         }
     }
 
@@ -192,19 +220,46 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
             ["stream"] = true,
         };
 
-        payload["options"] = temperature.HasValue
-            ? new { num_ctx = OllamaDefaults.ContextLength, temperature = temperature.Value }
-            : new { num_ctx = OllamaDefaults.ContextLength };
+        // Klein beginnen en zo nodig vergroten (zie OllamaDefaults). Komt er helemaal geen zichtbare tekst - het
+        // nadenken nam het hele venster in, of het stopte afgekapt - dan volgt een nieuwe poging met een groter
+        // venster. Is er al tekst aan de aanroeper doorgegeven, dan niet meer: die zou dubbel komen.
+        var stappen = OllamaDefaults.StappenVanaf(OllamaDefaults.BeginContext(messages, model));
 
-        await foreach (var stukje in LeesAsync(
-            client,
-            ProviderClient.CombineUrl(serverUrl, "/api/chat"),
-            payload,
-            "Ollama",
-            LeesOllamaRegel,
-            cancellationToken))
+        for (var i = 0; i < stappen.Count; i++)
         {
-            yield return stukje;
+            payload["options"] = temperature.HasValue
+                ? new { num_ctx = stappen[i], temperature = temperature.Value }
+                : new { num_ctx = stappen[i] };
+
+            var zagTekst = false;
+            var opnieuw = false;
+
+            await foreach (var stukje in LeesAsync(
+                client,
+                ProviderClient.CombineUrl(serverUrl, "/api/chat"),
+                payload,
+                "Ollama",
+                LeesOllamaRegel,
+                cancellationToken))
+            {
+                if (!string.IsNullOrEmpty(stukje.Text))
+                {
+                    zagTekst = true;
+                }
+
+                if (stukje.Done && !zagTekst && stukje.ErrorMessage is null && i < stappen.Count - 1)
+                {
+                    opnieuw = true;
+                    break;
+                }
+
+                yield return stukje;
+            }
+
+            if (!opnieuw)
+            {
+                yield break;
+            }
         }
     }
 
@@ -266,6 +321,7 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
 
             long promptTokens = 0;
             long completionTokens = 0;
+            var afgekapt = false;
 
             while (true)
             {
@@ -321,6 +377,11 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
 
                 // De tokens komen meestal in een LAATSTE stukje zonder
                 // tekst; onthouden en pas bij het afsluiten meegeven.
+                if (stukje.Truncated)
+                {
+                    afgekapt = true;
+                }
+
                 if (stukje.PromptTokens > 0)
                 {
                     promptTokens = stukje.PromptTokens;
@@ -356,7 +417,8 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
             yield return new ChatStreamChunk(
                 Done: true,
                 PromptTokens: promptTokens,
-                CompletionTokens: completionTokens);
+                CompletionTokens: completionTokens,
+                Truncated: afgekapt);
         }
     }
 
@@ -468,7 +530,10 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
         long prompt = wortel.TryGetProperty("prompt_eval_count", out var promptElement) ? promptElement.GetInt64() : 0;
         long completion = wortel.TryGetProperty("eval_count", out var evalElement) ? evalElement.GetInt64() : 0;
 
-        return new ChatStreamChunk(tekst, klaar, prompt, completion, Thinking: denkt);
+        var afgekapt = wortel.TryGetProperty("done_reason", out var redenElement) &&
+                       redenElement.ValueKind == JsonValueKind.String && redenElement.GetString() == "length";
+
+        return new ChatStreamChunk(tekst, klaar, prompt, completion, Thinking: denkt, Truncated: afgekapt);
     }
 
     private static string Kort(string tekst) => tekst.Length <= 300 ? tekst : tekst[..300] + "…";

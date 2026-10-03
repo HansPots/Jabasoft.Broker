@@ -50,7 +50,31 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
         }
     }
 
+    /// <summary>
+    /// Begint met een klein contextvenster (zie OllamaDefaults.BeginContext) en vergroot dat zelf als het antwoord
+    /// leeg of afgekapt terugkomt, tot het maximum.
+    /// </summary>
     private static async Task<ChatResult> ChatOllamaAsync(HttpClient client, string serverUrl, string model, IReadOnlyList<ChatMessage> messages, double? temperature, CancellationToken cancellationToken)
+    {
+        var stappen = OllamaDefaults.StappenVanaf(OllamaDefaults.BeginContext(messages, model));
+        ChatResult? laatste = null;
+
+        for (var i = 0; i < stappen.Count; i++)
+        {
+            var (resultaat, opnieuw) = await ChatOllamaMetContextAsync(client, serverUrl, model, messages, temperature, stappen[i], cancellationToken);
+            laatste = resultaat;
+
+            if (!opnieuw || i == stappen.Count - 1)
+            {
+                return resultaat;
+            }
+        }
+
+        return laatste!;
+    }
+
+    /// <summary>Eén poging met een vaste context. Opnieuw = true als een groter venster de moeite waard is.</summary>
+    private static async Task<(ChatResult Resultaat, bool Opnieuw)> ChatOllamaMetContextAsync(HttpClient client, string serverUrl, string model, IReadOnlyList<ChatMessage> messages, double? temperature, int context, CancellationToken cancellationToken)
     {
         var payload = new Dictionary<string, object>
         {
@@ -60,23 +84,26 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
         };
 
         payload["options"] = temperature.HasValue
-            ? new { num_ctx = OllamaDefaults.ContextLength, temperature = temperature.Value }
-            : new { num_ctx = OllamaDefaults.ContextLength };
+            ? new { num_ctx = context, temperature = temperature.Value }
+            : new { num_ctx = context };
 
         using var response = await client.PostAsJsonAsync(CombineUrl(serverUrl, "/api/chat"), payload, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
-            return new ChatResult(false, string.Empty, $"Ollama returned {(int)response.StatusCode}: {Truncate(body)}");
+            return (new ChatResult(false, string.Empty, $"Ollama returned {(int)response.StatusCode}: {Truncate(body)}"), false);
         }
 
         using var document = JsonDocument.Parse(body);
 
         if (document.RootElement.TryGetProperty("error", out var errorElement))
         {
-            return new ChatResult(false, string.Empty, $"Ollama error: {errorElement.GetString()}");
+            return (new ChatResult(false, string.Empty, $"Ollama error: {errorElement.GetString()}"), false);
         }
+
+        var afgekapt = document.RootElement.TryGetProperty("done_reason", out var reden) &&
+                       reden.ValueKind == JsonValueKind.String && reden.GetString() == "length";
 
         var text = document.RootElement.TryGetProperty("message", out var messageElement) &&
                    messageElement.TryGetProperty("content", out var contentElement)
@@ -85,16 +112,42 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
 
         if (string.IsNullOrWhiteSpace(text))
         {
-            return new ChatResult(false, string.Empty, "Ollama responded, but with an empty answer.");
+            // Leeg: meestal het nadenken dat het hele venster opmaakte. Een groter venster kan helpen.
+            return (new ChatResult(false, string.Empty, "Ollama responded, but with an empty answer."), true);
         }
 
         var promptTokens = document.RootElement.TryGetProperty("prompt_eval_count", out var promptElement) ? promptElement.GetInt64() : 0;
         var completionTokens = document.RootElement.TryGetProperty("eval_count", out var evalElement) ? evalElement.GetInt64() : 0;
 
-        return new ChatResult(true, text.Trim(), null, promptTokens, completionTokens);
+        return (new ChatResult(true, text.Trim(), null, promptTokens, completionTokens), afgekapt);
     }
 
+    /// <summary>
+    /// Zorgt eerst dat het model met een passende context geladen staat (zie LmStudioContext) en vergroot die zelf
+    /// als het antwoord leeg of afgekapt terugkomt.
+    /// </summary>
     private static async Task<ChatResult> ChatLmStudioAsync(HttpClient client, string serverUrl, string model, IReadOnlyList<ChatMessage> messages, double? temperature, CancellationToken cancellationToken)
+    {
+        var stappen = OllamaDefaults.StappenVanaf(OllamaDefaults.BeginContext(messages, model));
+        ChatResult? laatste = null;
+
+        for (var i = 0; i < stappen.Count; i++)
+        {
+            var beheerd = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            var (resultaat, opnieuw) = await ChatLmStudioEenmaalAsync(client, serverUrl, model, messages, temperature, cancellationToken);
+            laatste = resultaat;
+
+            // Zonder beheer van de context (geen lms) valt er niets te vergroten.
+            if (!beheerd || !opnieuw || i == stappen.Count - 1)
+            {
+                return resultaat;
+            }
+        }
+
+        return laatste!;
+    }
+
+    private static async Task<(ChatResult Resultaat, bool Opnieuw)> ChatLmStudioEenmaalAsync(HttpClient client, string serverUrl, string model, IReadOnlyList<ChatMessage> messages, double? temperature, CancellationToken cancellationToken)
     {
         var payload = new Dictionary<string, object>
         {
@@ -113,7 +166,7 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
 
         if (!response.IsSuccessStatusCode)
         {
-            return new ChatResult(false, string.Empty, $"LM Studio returned {(int)response.StatusCode}: {Truncate(body)}");
+            return (new ChatResult(false, string.Empty, $"LM Studio returned {(int)response.StatusCode}: {Truncate(body)}"), false);
         }
 
         using var document = JsonDocument.Parse(body);
@@ -123,14 +176,18 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
             var errorMessage = errorElement.TryGetProperty("message", out var messageElement)
                 ? messageElement.GetString()
                 : errorElement.ToString();
-            return new ChatResult(false, string.Empty, $"LM Studio error: {errorMessage}");
+            return (new ChatResult(false, string.Empty, $"LM Studio error: {errorMessage}"), false);
         }
 
-        var text = document.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        var keuze = document.RootElement.GetProperty("choices")[0];
+        var text = keuze.GetProperty("message").GetProperty("content").GetString();
+        var afgekapt = keuze.TryGetProperty("finish_reason", out var reden) &&
+                       reden.ValueKind == JsonValueKind.String && reden.GetString() == "length";
 
         if (string.IsNullOrWhiteSpace(text))
         {
-            return new ChatResult(false, string.Empty, "LM Studio responded, but with an empty answer.");
+            // Leeg: meestal het nadenken dat het hele venster opmaakte. Een groter venster kan helpen.
+            return (new ChatResult(false, string.Empty, "LM Studio responded, but with an empty answer."), true);
         }
 
         // LM Studio geeft vraag en antwoord apart op (prompt_tokens /
@@ -159,7 +216,7 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
             }
         }
 
-        return new ChatResult(true, text.Trim(), null, promptTokens, completionTokens);
+        return (new ChatResult(true, text.Trim(), null, promptTokens, completionTokens), afgekapt);
     }
 
     public async Task<EmbedResult> EmbedAsync(AiProvider provider, string serverUrl, string model, string text, CancellationToken cancellationToken)

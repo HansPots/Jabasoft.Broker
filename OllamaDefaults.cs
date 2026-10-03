@@ -1,3 +1,5 @@
+using Jabasoft.Base.AiBroker;
+
 namespace Jabasoft.Broker;
 
 /// <summary>
@@ -32,4 +34,40 @@ internal static class OllamaDefaults
     /// gewoon een ruime vaste waarde die op deze machine geverifieerd is.
     /// </summary>
     public const int ContextLength = 24576;
+
+    /// <summary>
+    /// De stappen waarin de context groeit. Een model dat met een groot venster draait houdt per 1000 tokens
+    /// ongeveer 160 MB videogeheugen vast (Qwen3-14B), dus bij 24576 is dat al ruim 3,5 GB voor een venster dat
+    /// meestal grotendeels leeg blijft. We beginnen daarom klein en vergroten alleen als het nodig blijkt.
+    /// </summary>
+    public static readonly int[] Stappen = [2048, 4096, 8192, 16384, ContextLength];
+
+    /// <summary>
+    /// Modellen die eerst hardop nadenken (en dat doen in hetzelfde budget als het antwoord): DeepSeek-R1,
+    /// Qwen3, GLM en soortgenoten. Die hebben een veel groter venster nodig dan hun vraag en antwoord doen vermoeden.
+    /// </summary>
+    private static readonly string[] DenkendeModellen = ["r1", "qwen3", "glm-4", "glm4", "think", "gpt-oss", "magistral"];
+
+    public static bool Denkt(string model) =>
+        DenkendeModellen.Any(naam => model.Contains(naam, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// De kleinste stap waarin de vraag past plus ruimte voor het antwoord. Een schatting: drie tekens per token is
+    /// aan de voorzichtige kant, een afbeelding rekenen we op 2000 tokens. Een model dat denkt krijgt minstens
+    /// 8192 en een flinke marge, omdat zijn nadenken evenveel ruimte inneemt als het antwoord zelf.
+    /// </summary>
+    public static int BeginContext(IReadOnlyList<ChatMessage> messages, string model)
+    {
+        var tekens = messages.Sum(bericht => bericht.Content?.Length ?? 0);
+        var afbeeldingen = messages.Sum(bericht => bericht.Images?.Count ?? 0);
+        var vraag = (tekens / 3) + (messages.Count * 20) + (afbeeldingen * 2000);
+
+        var denkt = Denkt(model);
+        var nodig = Math.Max(vraag + (denkt ? 5120 : 1536), denkt ? 8192 : 2048);
+
+        return Stappen.FirstOrDefault(stap => stap >= nodig, ContextLength);
+    }
+
+    /// <summary>Deze stap en alle grotere: de volgorde waarin we het opnieuw proberen.</summary>
+    public static IReadOnlyList<int> StappenVanaf(int begin) => [.. Stappen.Where(stap => stap >= begin)];
 }
