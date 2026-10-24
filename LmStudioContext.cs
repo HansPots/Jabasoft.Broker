@@ -14,6 +14,11 @@ namespace Jabasoft.Broker;
 ///
 /// Wat we NIET aanraken: een model dat iemand zelf in LM Studio geladen heeft (herkenbaar aan het ontbreken van een
 /// automatische ontlaadtijd). Zo'n model blijft zoals het is, tenzij zijn context te klein is voor de aanvraag.
+///
+/// Eén groot model tegelijk: moet er een ANDER chat-, code- of beeldmodel geladen worden, dan gaan de grote modellen
+/// die automatisch geladen zijn eerst uit het geheugen. Twee modellen van 6-9 GB passen niet samen in 12 GB
+/// videogeheugen, en dan mislukt het laden van de tweede. Omdat de broker toch één vraag tegelijk doorlaat (zie
+/// RequestGate), staat er op dat moment niets op die modellen te wachten. Embeddingmodellen zijn klein en blijven staan.
 /// </summary>
 internal static class LmStudioContext
 {
@@ -30,14 +35,16 @@ internal static class LmStudioContext
     private sealed record Geladen(string Identifier, int Context, bool Handmatig);
 
     /// <summary>
-    /// Zorgt dat het model geladen staat met minstens deze context. Geeft true als dat is geregeld (of al zo was),
+    /// Zorgt dat het model geladen staat met minstens deze context. Beheerd = true als dat is geregeld (of al zo was),
     /// false als we er niets aan kunnen doen; de aanroeper gaat dan gewoon door zonder opnieuw te proberen.
+    /// Fout is gevuld als `lms` het model probeerde te laden en dat mislukte - dan heeft doorgaan geen zin, LM Studio
+    /// loopt er zelf net zo goed op vast, en wordt het anders een leeg antwoord zonder uitleg.
     /// </summary>
-    public static async Task<bool> ZorgVoorAsync(string model, int context, CancellationToken cancellationToken)
+    public static async Task<(bool Beheerd, string? Fout)> ZorgVoorAsync(string model, int context, CancellationToken cancellationToken)
     {
         if (Lms is null)
         {
-            return false;
+            return (false, null);
         }
 
         await Slot.WaitAsync(cancellationToken);
@@ -47,7 +54,7 @@ internal static class LmStudioContext
 
             if (geladen is not null && Past(geladen, context))
             {
-                return true;
+                return (true, null);
             }
 
             if (geladen is not null)
@@ -55,12 +62,22 @@ internal static class LmStudioContext
                 await VoerUitAsync($"unload \"{geladen.Identifier}\"", cancellationToken);
             }
 
-            return await VoerUitAsync($"load \"{model}\" -c {context} --ttl {OntlaadNaSeconden} -y", cancellationToken);
+            foreach (var ander in await AndereGroteModellenAsync(model, cancellationToken))
+            {
+                await VoerUitAsync($"unload \"{ander}\"", cancellationToken);
+            }
+
+            var (gelukt, uitvoer) = await LeesAsync($"load \"{model}\" -c {context} --ttl {OntlaadNaSeconden} -y", cancellationToken, metFouten: true);
+            return gelukt ? (true, null) : (false, Laadfout(model, uitvoer));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception)
         {
             // lms ontbreekt, hangt of geeft een fout: dan doet LM Studio het zelf, zoals voor deze functie bestond.
-            return false;
+            return (false, null);
         }
         finally
         {
@@ -110,14 +127,63 @@ internal static class LmStudioContext
         return null;
     }
 
+    /// <summary>
+    /// De grote modellen (chat, code, beeld) die nu automatisch geladen staan, behalve <paramref name="model"/> zelf.
+    /// Handmatig geladen modellen (zonder ontlaadtijd) en embeddingmodellen tellen niet mee.
+    /// </summary>
+    private static async Task<List<string>> AndereGroteModellenAsync(string model, CancellationToken cancellationToken)
+    {
+        var (gelukt, uitvoer) = await LeesAsync("ps --json", cancellationToken);
+        if (!gelukt || string.IsNullOrWhiteSpace(uitvoer))
+        {
+            return [];
+        }
+
+        var anderen = new List<string>();
+        using var document = JsonDocument.Parse(uitvoer);
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            var soort = item.TryGetProperty("type", out var s) ? s.GetString() : null;
+            var sleutel = item.TryGetProperty("modelKey", out var k) ? k.GetString() : null;
+            var identifier = item.TryGetProperty("identifier", out var i) ? i.GetString() : null;
+            var heeftTtl = item.TryGetProperty("ttlMs", out var t) && t.ValueKind == JsonValueKind.Number;
+
+            if (!string.Equals(soort, "llm", StringComparison.OrdinalIgnoreCase) || !heeftTtl || identifier is null ||
+                string.Equals(sleutel, model, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(identifier, model, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            anderen.Add(identifier);
+        }
+
+        return anderen;
+    }
+
+    /// <summary>Een melding die zegt wat er aan de hand is. Bijna altijd is het videogeheugen vol.</summary>
+    private static string Laadfout(string model, string uitvoer)
+    {
+        var geheugen = uitvoer.Contains("memory", StringComparison.OrdinalIgnoreCase)
+            || uitvoer.Contains("allocate", StringComparison.OrdinalIgnoreCase)
+            || uitvoer.Contains("kv cache", StringComparison.OrdinalIgnoreCase);
+
+        return geheugen
+            ? $"{model} kon niet geladen worden in LM Studio: te weinig videogeheugen. Een ander programma gebruikt de videokaart (bijvoorbeeld de beeldservice van ImageFunn tijdens een beeld- of video-opdracht). Probeer het opnieuw als dat klaar is."
+            : $"{model} kon niet geladen worden in LM Studio. Kijk in LM Studio bij Developer > Logs wat er misging.";
+    }
+
     private static async Task<bool> VoerUitAsync(string argumenten, CancellationToken cancellationToken)
     {
         var (gelukt, _) = await LeesAsync(argumenten, cancellationToken);
         return gelukt;
     }
 
-    /// <summary>Voert `lms` uit en geeft wat het op de standaarduitvoer zei. De voortgangsbalk van `load` negeren we.</summary>
-    private static async Task<(bool Gelukt, string Uitvoer)> LeesAsync(string argumenten, CancellationToken cancellationToken)
+    /// <summary>
+    /// Voert `lms` uit en geeft wat het op de standaarduitvoer zei. De voortgangsbalk van `load` negeren we.
+    /// Met <paramref name="metFouten"/> komt de foutuitvoer erachter - om een mislukt laden te kunnen uitleggen.
+    /// </summary>
+    private static async Task<(bool Gelukt, string Uitvoer)> LeesAsync(string argumenten, CancellationToken cancellationToken, bool metFouten = false)
     {
         using var proces = Process.Start(new ProcessStartInfo
         {
@@ -138,12 +204,12 @@ internal static class LmStudioContext
         limiet.CancelAfter(LmsTijdlimiet);
 
         var uitvoer = proces.StandardOutput.ReadToEndAsync(limiet.Token);
-        _ = proces.StandardError.ReadToEndAsync(limiet.Token);
+        var fouten = proces.StandardError.ReadToEndAsync(limiet.Token);
 
         try
         {
             await proces.WaitForExitAsync(limiet.Token);
-            return (proces.ExitCode == 0, await uitvoer);
+            return (proces.ExitCode == 0, metFouten ? await uitvoer + "\n" + await fouten : await uitvoer);
         }
         catch (OperationCanceledException)
         {

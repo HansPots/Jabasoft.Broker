@@ -40,6 +40,11 @@ builder.Services.AddSingleton<ProviderClient>();
 builder.Services.AddSingleton<ProviderStream>();
 builder.Services.AddSingleton<RequestGate>();
 
+// De boekhouding van alle vragen aan de modellen: wat loopt, wat wacht, wat
+// net klaar is. Elke applicatie toont hem in haar footer (GET /api/queue) en
+// kan er een vraag mee annuleren - zie AiWachtrij.
+builder.Services.AddSingleton<AiWachtrij>();
+
 // De AI-database: JabasoftAi, een eigen database naast JabasoftBase en
 // JabasoftStylebook. AddDbContext (scoped) en niet AddSingleton: een
 // DbContext is niet thread-safe en Minimal API maakt toch al een scope
@@ -73,7 +78,8 @@ app.Use(async (context, next) =>
     var path = context.Request.Path.Value ?? string.Empty;
     var stil = path.StartsWith("/health", StringComparison.OrdinalIgnoreCase)
         || path.StartsWith("/logs", StringComparison.OrdinalIgnoreCase)
-        || path.StartsWith("/api/usage/models", StringComparison.OrdinalIgnoreCase);
+        || path.StartsWith("/api/usage/models", StringComparison.OrdinalIgnoreCase)
+        || path.Equals("/api/queue", StringComparison.OrdinalIgnoreCase);
 
     if (stil)
     {
@@ -166,13 +172,30 @@ app.MapPost("/api/test-connection", async (TestConnectionRequest request, Provid
     return Results.Ok(result);
 });
 
-app.MapPost("/api/chat", async (ChatRequest request, ProviderClient client, RequestGate gate, TokenUsageStore usage, CancellationToken ct) =>
+app.MapPost("/api/chat", async (ChatRequest request, ProviderClient client, RequestGate gate, TokenUsageStore usage, AiWachtrij wachtrij, CancellationToken ct) =>
 {
-    var result = await gate.RunGatedAsync(
-        request.Provider,
-        request.ServerUrl,
-        () => client.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, ct),
-        ct);
+    var vraag = wachtrij.Aanmelden(request.Application, request.Onderdeel, request.Model, "chat", ct);
+    ChatResult result;
+    string? afrondFout = "Afgebroken.";
+
+    try
+    {
+        result = await gate.RunGatedAsync(
+            request.Provider,
+            request.ServerUrl,
+            () => client.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, vraag.Token),
+            vraag.Token,
+            () => wachtrij.Begonnen(vraag));
+        afrondFout = result.Success ? null : result.ErrorMessage ?? "Mislukt.";
+    }
+    catch (OperationCanceledException) when (AiWachtrij.IsGeannuleerd(vraag))
+    {
+        result = new ChatResult(false, string.Empty, "Geannuleerd.");
+    }
+    finally
+    {
+        wachtrij.Afronden(vraag, afrondFout);
+    }
 
     // Na het antwoord, niet ervoor: pas dan weten we wat het gekost heeft.
     // Mislukt het wegschrijven, dan merkt de aanroeper daar niets van - zie
@@ -190,8 +213,13 @@ app.MapPost("/api/chat", async (ChatRequest request, ProviderClient client, Requ
 // laten aangroeien en een teller kan laten meelopen. Het wegschrijven van
 // het verbruik gebeurt hier net zo goed - aan het eind, als de server
 // verteld heeft wat het gekost heeft.
-app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream stream, RequestGate gate, TokenUsageStore usage, ActivityLog log, AiSettingsStore settings, HttpContext context, CancellationToken ct) =>
+app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream stream, RequestGate gate, TokenUsageStore usage, ActivityLog log, AiSettingsStore settings, AiWachtrij wachtrij, HttpContext context, CancellationToken ct) =>
 {
+    // In de wachtrij: vanaf nu zichtbaar in de footer van elke applicatie, en
+    // te annuleren. Het token van de vraag gaat ook af als de aanvrager
+    // ophangt, dus het vervangt ct voor alles behalve het terugschrijven.
+    var vraag = wachtrij.Aanmelden(request.Application, request.Onderdeel, request.Model, "chat", ct);
+
     context.Response.ContentType = "application/x-ndjson";
 
     // Niets bufferen: een stukje dat in een buffer blijft hangen tot het
@@ -213,8 +241,8 @@ app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream strea
     using var denktijdBewaking = maxDenktijd > 0 ? new CancellationTokenSource() : null;
     using var gekoppeld = denktijdBewaking is null
         ? null
-        : CancellationTokenSource.CreateLinkedTokenSource(ct, denktijdBewaking.Token);
-    var aanroepToken = gekoppeld?.Token ?? ct;
+        : CancellationTokenSource.CreateLinkedTokenSource(vraag.Token, denktijdBewaking.Token);
+    var aanroepToken = gekoppeld?.Token ?? vraag.Token;
 
     var begin = DateTime.UtcNow;
     var echteTekstGezien = false;
@@ -226,8 +254,11 @@ app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream strea
             request.Provider,
             request.ServerUrl,
             () => stream.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, aanroepToken),
-            aanroepToken))
+            aanroepToken,
+            () => wachtrij.Begonnen(vraag)))
         {
+            wachtrij.Voortgang(vraag, stukje);
+
             if (!echteTekstGezien && !string.IsNullOrEmpty(stukje.Text))
             {
                 echteTekstGezien = true;
@@ -255,6 +286,18 @@ app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream strea
     {
         // Verwacht: dit is onze EIGEN afbreking hierboven, geen echte annulering.
     }
+    catch (OperationCanceledException) when (AiWachtrij.IsGeannuleerd(vraag) && !ct.IsCancellationRequested)
+    {
+        // Iemand klikte op Annuleren. De aanvrager hangt nog aan de lijn, dus
+        // die krijgt netjes een slotstukje met de reden.
+        fout = "Geannuleerd.";
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new ChatStreamChunk(Done: true, ErrorMessage: fout), StreamJson) + "\n", ct);
+        await context.Response.Body.FlushAsync(ct);
+    }
+    finally
+    {
+        wachtrij.Afronden(vraag, fout ?? teLangNagedacht ?? (ct.IsCancellationRequested ? "Afgebroken." : null));
+    }
 
     if (teLangNagedacht is not null)
     {
@@ -273,13 +316,30 @@ app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream strea
         : $"Chat (stromend) met {request.Model} mislukt: {fout}");
 });
 
-app.MapPost("/api/embed", async (EmbedRequest request, ProviderClient client, RequestGate gate, TokenUsageStore usage, CancellationToken ct) =>
+app.MapPost("/api/embed", async (EmbedRequest request, ProviderClient client, RequestGate gate, TokenUsageStore usage, AiWachtrij wachtrij, CancellationToken ct) =>
 {
-    var result = await gate.RunGatedAsync(
-        request.Provider,
-        request.ServerUrl,
-        () => client.EmbedAsync(request.Provider, request.ServerUrl, request.Model, request.Text, ct),
-        ct);
+    var vraag = wachtrij.Aanmelden(request.Application, request.Onderdeel, request.Model, "embedding", ct);
+    EmbedResult result;
+    string? afrondFout = "Afgebroken.";
+
+    try
+    {
+        result = await gate.RunGatedAsync(
+            request.Provider,
+            request.ServerUrl,
+            () => client.EmbedAsync(request.Provider, request.ServerUrl, request.Model, request.Text, vraag.Token),
+            vraag.Token,
+            () => wachtrij.Begonnen(vraag));
+        afrondFout = result.Success ? null : result.ErrorMessage ?? "Mislukt.";
+    }
+    catch (OperationCanceledException) when (AiWachtrij.IsGeannuleerd(vraag))
+    {
+        result = new EmbedResult(false, [], "Geannuleerd.");
+    }
+    finally
+    {
+        wachtrij.Afronden(vraag, afrondFout);
+    }
 
     // Een embedding kent geen antwoordtokens - alles zit aan de promptkant.
     if (result.Success)
@@ -288,6 +348,23 @@ app.MapPost("/api/embed", async (EmbedRequest request, ProviderClient client, Re
     }
 
     return Results.Ok(result);
+});
+
+// --- Wachtrij -------------------------------------------------------------
+// Wat er aan vragen loopt, wacht en net klaar is - voor de footer van elke
+// applicatie. Annuleren haalt een wachtende vraag uit de rij of breekt een
+// lopende af; 404 als hij er niet (meer) is.
+app.MapGet("/api/queue", (AiWachtrij wachtrij) => Results.Ok(wachtrij.Lijst()));
+
+app.MapPost("/api/queue/{id:long}/annuleren", (long id, AiWachtrij wachtrij, ActivityLog log) =>
+{
+    if (!wachtrij.Annuleer(id))
+    {
+        return Results.NotFound();
+    }
+
+    log.Add("broker", $"Wachtrij: vraag {id} geannuleerd");
+    return Results.Ok();
 });
 
 // --- Tokenverbruik -------------------------------------------------------

@@ -42,12 +42,14 @@ internal sealed class RequestGate(ProviderClient providerClient, IConfiguration 
         return result;
     }
 
-    public async Task<T> RunGatedAsync<T>(AiProvider provider, string serverUrl, Func<Task<T>> action, CancellationToken cancellationToken)
+    /// <param name="opBeurt">Gaat af op het moment dat deze aanroep aan de beurt is - voor de wachtrij (zie AiWachtrij).</param>
+    public async Task<T> RunGatedAsync<T>(AiProvider provider, string serverUrl, Func<Task<T>> action, CancellationToken cancellationToken, Action? opBeurt = null)
     {
         var semaphore = _semaphores.GetOrAdd(Key(provider, serverUrl), _ => new SemaphoreSlim(MaxConcurrentPerServer, MaxConcurrentPerServer));
         await semaphore.WaitAsync(cancellationToken);
         try
         {
+            opBeurt?.Invoke();
             return await action();
         }
         finally
@@ -67,7 +69,8 @@ internal sealed class RequestGate(ProviderClient providerClient, IConfiguration 
         AiProvider provider,
         string serverUrl,
         Func<IAsyncEnumerable<T>> action,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken,
+        Action? opBeurt = null)
     {
         ArgumentNullException.ThrowIfNull(action);
 
@@ -75,6 +78,7 @@ internal sealed class RequestGate(ProviderClient providerClient, IConfiguration 
         await semaphore.WaitAsync(cancellationToken);
         try
         {
+            opBeurt?.Invoke();
             await foreach (var stukje in action().WithCancellation(cancellationToken))
             {
                 yield return stukje;

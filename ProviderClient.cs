@@ -133,7 +133,13 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
 
         for (var i = 0; i < stappen.Count; i++)
         {
-            var beheerd = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            var (beheerd, laadfout) = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+
+            if (laadfout is not null)
+            {
+                return new ChatResult(false, string.Empty, laadfout);
+            }
+
             var (resultaat, opnieuw) = await ChatLmStudioEenmaalAsync(client, serverUrl, model, messages, temperature, cancellationToken);
             laatste = resultaat;
 

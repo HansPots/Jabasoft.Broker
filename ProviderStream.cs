@@ -129,7 +129,14 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
 
         for (var i = 0; i < stappen.Count; i++)
         {
-            var beheerd = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            var (beheerd, laadfout) = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+
+            if (laadfout is not null)
+            {
+                yield return new ChatStreamChunk(Done: true, ErrorMessage: laadfout);
+                yield break;
+            }
+
             var zagTekst = false;
             var opnieuw = false;
 
