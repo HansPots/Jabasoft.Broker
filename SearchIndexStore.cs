@@ -59,7 +59,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
                 continue;
             }
 
-            var resultaat = await client.EmbedAsync(request.Provider, request.ServerUrl, request.Model, bestand.Content, cancellationToken);
+            var resultaat = await client.EmbedAsync(request.Provider, request.ServerUrl, request.Model, EmbeddingPrefix.Document(request.Model, bestand.Content), cancellationToken);
 
             if (!resultaat.Success)
             {
@@ -143,7 +143,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
 
         foreach (var document in documenten)
         {
-            var resultaat = await client.EmbedAsync(provider, serverUrl, model, document.Content, cancellationToken);
+            var resultaat = await client.EmbedAsync(provider, serverUrl, model, EmbeddingPrefix.Document(model, document.Content), cancellationToken);
 
             if (!resultaat.Success)
             {
@@ -188,7 +188,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
     /// </summary>
     public async Task<SemanticSearchResult> SearchAsync(SemanticSearchRequest request, CancellationToken cancellationToken)
     {
-        var vraag = await client.EmbedAsync(request.Provider, request.ServerUrl, request.Model, request.Query, cancellationToken);
+        var vraag = await client.EmbedAsync(request.Provider, request.ServerUrl, request.Model, EmbeddingPrefix.Vraag(request.Model, request.Query), cancellationToken);
 
         if (!vraag.Success)
         {
