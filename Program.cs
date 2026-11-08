@@ -55,6 +55,10 @@ builder.Services.AddDbContext<AiDbContext>(options => options.UseSqlServer(
 
 builder.Services.AddScoped<SearchIndexStore>();
 
+// Hermes Agent: de instellingen die Jabasoft in Hermes' config.yaml beheert
+// (hoofdmodel, lokaal model, Jabasoft-tools) - zie HermesConfigStore.
+builder.Services.AddSingleton<HermesConfigStore>();
+
 // MCP: dezelfde broker, maar als gereedschap voor AI-agents (Claude Code,
 // Hermes) op /mcp. Voorlopig alleen tools die LEZEN - zie McpTools.cs.
 // Stateless: elke aanroep staat op zichzelf, er is geen sessie die de
@@ -407,6 +411,16 @@ app.MapPost("/api/search/index", async (SearchIndexRequest request, SearchIndexS
 
 app.MapPost("/api/search/semantic", async (SemanticSearchRequest request, SearchIndexStore index, CancellationToken ct) =>
     Results.Ok(await index.SearchAsync(request, ct)));
+
+// --- Hermes Agent ----------------------------------------------------------
+// Voor de Hermes-kaart in Jabasoft: status lezen en de instellingen van
+// Jabasoft (hoofdmodel, lokaal model, Jabasoft-tools) wijzigen. Sleutels
+// komen hier nooit langs - alleen OF ze er zijn.
+app.MapGet("/api/hermes", async (HermesConfigStore hermes, CancellationToken ct) =>
+    Results.Ok(await hermes.LeesAsync(ct)));
+
+app.MapPut("/api/hermes", async (HermesInstelling instelling, HermesConfigStore hermes, CancellationToken ct) =>
+    Results.Ok(await hermes.BewaarAsync(instelling, ct)));
 
 // --- MCP ------------------------------------------------------------------
 // Het endpoint voor AI-agents. Alleen op localhost, net als de rest: van

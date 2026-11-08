@@ -5,7 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Jabasoft.Broker</RootNamespace>
-    <Version>0.1.0.1</Version>
+    <Version>0.1.0.3</Version>
+    <!-- Niet-deterministisch: elke build geeft een ander bestand. Smart App
+         Control onthoudt zijn oordeel per bestand (hash); is één build ooit
+         geblokkeerd, dan zou een deterministische herbouw van dezelfde code
+         precies dat geblokkeerde bestand opnieuw opleveren. -->
+    <Deterministic>false</Deterministic>
   </PropertyGroup>
 
   <ItemGroup>
@@ -32,6 +37,10 @@
          en Hermes de broker als gereedschap kunnen gebruiken - zie
          McpTools.cs. -->
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.4.0" />
+
+    <!-- Om Hermes' config.yaml te lezen en alleen de sleutels van Jabasoft
+         te wijzigen - zie HermesConfigStore.cs. -->
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
 
 </Project>
