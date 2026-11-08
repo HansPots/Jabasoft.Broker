@@ -1,0 +1,44 @@
+# Hermes Agent - voorbeeldconfig voor de Jabasoft-omgeving.
+#
+# Kopieer de blokken hieronder naar de config.yaml van Hermes:
+#   - Hermes Desktop op Windows: %LOCALAPPDATA%\hermes\config.yaml
+#   - CLI/WSL:                   ~/.hermes/config.yaml
+# Of stel hetzelfde in via de Desktop-app (Instellingen: Providers / MCP).
+#
+# De Anthropic-API-sleutel staat NIET in dit bestand: die voer je in met
+# `hermes model` (of in de app), zodat hij in Hermes' eigen sleutelopslag
+# komt en nooit in git.
+
+# --- Hoofdmodel: Claude via de Anthropic-API ------------------------------
+# Inloggen met een Claude-abonnement werkt bij Hermes alleen met Max plus
+# bijgekochte extra usage; met Pro gebruik je een API-sleutel.
+model:
+  provider: "anthropic"
+  default: "claude-sonnet-5-5"
+
+# --- Bijtaken lokaal via LM Studio ---------------------------------------
+# Samenvatten/compressie en vision hoeven niet naar Claude: dat kan op de
+# eigen machine. LM Studio moet draaien op poort 1234 en deze modellen moeten
+# met minstens 64.000 tokens context geladen zijn (Hermes weigert minder).
+auxiliary:
+  compression:
+    model: "qwen/qwen3-14b"
+    base_url: "http://localhost:1234/v1"
+  vision:
+    model: "qwen3-vl-8b-instruct"
+    base_url: "http://localhost:1234/v1"
+
+# --- Reserve als Claude niet bereikbaar is (limiet, storing) --------------
+fallback_providers:
+  - provider: lmstudio
+    model: "qwen/qwen3-14b"
+    base_url: "http://localhost:1234/v1"
+
+# --- Jabasoft als gereedschap --------------------------------------------
+# De broker (Jabasoft.Broker) op localhost:5310. Voorlopig alleen tools die
+# lezen: broker_status, modellen, wachtrij, verbruik, zoek, logs.
+mcp_servers:
+  jabasoft:
+    url: "http://localhost:5310/mcp"
+    timeout: 120
+    connect_timeout: 15

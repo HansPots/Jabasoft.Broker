@@ -43,3 +43,31 @@ builder.Services.AddHttpClient<IAiBrokerClient, AiBrokerClient>(c =>
 
 Zie `Jabasoft.Base/AiBroker/IAiBrokerClient.cs` voor de contracten
 (`ChatAsync`, `EmbedAsync`, `TestConnectionAsync`, `ListModelsAsync`).
+
+## MCP: de broker als gereedschap voor AI-agents
+
+Op `http://localhost:5310/mcp` biedt de broker een MCP-server (Model Context
+Protocol, streamable HTTP, stateless) aan, zodat AI-agents zoals Claude Code
+en Hermes met Jabasoft kunnen werken. Voorlopig alleen tools die **lezen**
+(zie `McpTools.cs`):
+
+| Tool | Wat |
+|---|---|
+| `broker_status` | ingestelde server en modellen, database bereikbaar, aantal vragen in de wachtrij |
+| `modellen` | modellen die nu op LM Studio/Ollama staan |
+| `wachtrij` | lopende, wachtende en net afgeronde AI-vragen van alle apps |
+| `verbruik` | tokenverbruik per week, per model en per onderdeel |
+| `zoek` | semantisch zoeken in de zoekindex van een project (leeg = lijst projecten) |
+| `logs` | recente activiteit van de broker |
+
+Alleen bereikbaar op localhost. Werkt alleen zolang de broker draait (die
+start met de eerste Jabasoft-app).
+
+**Claude Code** (staat al in `~/.claude.json`, of opnieuw):
+```
+claude mcp add --transport http --scope user jabasoft http://localhost:5310/mcp
+```
+
+**Hermes Agent**: zie `hermes/config.jabasoft.yaml` - daar staan het MCP-blok
+én de modelkeuze (Claude als hoofdmodel, LM Studio voor bijtaken en als
+reserve).

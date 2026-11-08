@@ -55,6 +55,14 @@ builder.Services.AddDbContext<AiDbContext>(options => options.UseSqlServer(
 
 builder.Services.AddScoped<SearchIndexStore>();
 
+// MCP: dezelfde broker, maar als gereedschap voor AI-agents (Claude Code,
+// Hermes) op /mcp. Voorlopig alleen tools die LEZEN - zie McpTools.cs.
+// Stateless: elke aanroep staat op zichzelf, er is geen sessie die de
+// broker moet onthouden (net als bij de rest van de API).
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options => options.Stateless = true)
+    .WithTools<McpTools>();
+
 var app = builder.Build();
 
 // De database (en de tabel erin) meteen op orde bij het opstarten - net
@@ -399,5 +407,10 @@ app.MapPost("/api/search/index", async (SearchIndexRequest request, SearchIndexS
 
 app.MapPost("/api/search/semantic", async (SemanticSearchRequest request, SearchIndexStore index, CancellationToken ct) =>
     Results.Ok(await index.SearchAsync(request, ct)));
+
+// --- MCP ------------------------------------------------------------------
+// Het endpoint voor AI-agents. Alleen op localhost, net als de rest: van
+// buitenaf (telefoon) loopt het via de gateway van Hermes.
+app.MapMcp("/mcp");
 
 app.Run();
