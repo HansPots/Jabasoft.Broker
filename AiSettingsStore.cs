@@ -130,7 +130,55 @@ public sealed class AiSettingsStore
             Sterren = NormaliseerGetallen(server.Sterren, 0, 5),
             MaxDenktijdSeconden = NormaliseerGetallen(server.MaxDenktijdSeconden, 0, 3600),
             Omschrijvingen = NormaliseerOmschrijvingen(server.Omschrijvingen),
+            // De oude lijst (van vóór de splitsing per onderdeel) gaat op in de nieuwe: een
+            // favoriet van toen is er een voor elk onderdeel. Daarna is de oude lijst leeg.
+            Favorieten = null,
+            FavorietenPerOnderdeel = NormaliseerFavorietenPerOnderdeel(server.FavorietenPerOnderdeel, NormaliseerFavorieten(server.Favorieten)),
+            Verborgen = NormaliseerFavorieten(server.Verborgen),
         };
+    }
+
+    /// <summary>
+    /// Alleen bekende onderdelen, per onderdeel zonder lege of dubbele namen. Zijn er nog oude favorieten (één lijst
+    /// voor alles), dan komen die bij elk onderdeel. Niets over = null.
+    /// </summary>
+    private static IReadOnlyDictionary<string, IReadOnlyList<string>>? NormaliseerFavorietenPerOnderdeel(
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? perOnderdeel,
+        IReadOnlyList<string>? oud)
+    {
+        var schoon = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var onderdeel in Onderdelen.Alle)
+        {
+            var lijst = new List<string>();
+            if (perOnderdeel is not null && perOnderdeel.TryGetValue(onderdeel, out var bewaard))
+            {
+                lijst.AddRange(bewaard);
+            }
+
+            if (oud is not null)
+            {
+                lijst.AddRange(oud);
+            }
+
+            if (NormaliseerFavorieten(lijst) is { } namen)
+            {
+                schoon[onderdeel] = namen;
+            }
+        }
+
+        return schoon.Count > 0 ? schoon : null;
+    }
+
+    /// <summary>Lege en dubbele namen eruit; een lege lijst wordt null.</summary>
+    private static IReadOnlyList<string>? NormaliseerFavorieten(IReadOnlyList<string>? favorieten)
+    {
+        var schoon = favorieten?
+            .Where(naam => !string.IsNullOrWhiteSpace(naam))
+            .Select(naam => naam.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return schoon is { Count: > 0 } ? schoon : null;
     }
 
     /// <summary>Lege modelnamen en lege/te lange notities eruit; een lege lijst wordt null.</summary>

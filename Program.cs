@@ -19,6 +19,11 @@ builder.Services.AddHttpClient("embed", c => c.Timeout = TimeSpan.FromSeconds(30
 builder.Services.AddHttpClient("catalog", c => c.Timeout = TimeSpan.FromSeconds(10));
 builder.Services.AddHttpClient("test", c => c.Timeout = TimeSpan.FromSeconds(30));
 
+// Voor het doorgeefluik van Hermes (HermesProxy): ruim, want een lokaal
+// model kan bij een lange agentstap even bezig zijn voor het eerste stukje
+// binnen is - en daarna loopt de stroom buiten deze tijdslimiet om.
+builder.Services.AddHttpClient("hermes", c => c.Timeout = TimeSpan.FromMinutes(15));
+
 // Wat de broker doet, in het geheugen, zodat elke applicatie het kan
 // ophalen en in zijn Activity-blok tonen. Niet via de console-uitvoer:
 // die is alleen te zien door wie het proces zelf gestart heeft, en de
@@ -59,13 +64,21 @@ builder.Services.AddScoped<SearchIndexStore>();
 // (hoofdmodel, lokaal model, Jabasoft-tools) - zie HermesConfigStore.
 builder.Services.AddSingleton<HermesConfigStore>();
 
+// Goose (Block): het model dat Jabasoft in Goose' config beheert - zie GooseConfigStore.
+builder.Services.AddSingleton<GooseConfigStore>();
+
 // MCP: dezelfde broker, maar als gereedschap voor AI-agents (Claude Code,
 // Hermes) op /mcp. Voorlopig alleen tools die LEZEN - zie McpTools.cs.
 // Stateless: elke aanroep staat op zichzelf, er is geen sessie die de
 // broker moet onthouden (net als bij de rest van de API).
 builder.Services.AddMcpServer()
     .WithHttpTransport(options => options.Stateless = true)
-    .WithTools<McpTools>();
+    .WithTools<McpTools>()
+    .WithTools<BeeldTools>();
+
+// Voor de beeldservice van ImageFunn (BeeldTools): korte aanroepen - het
+// wachten op een tekening gebeurt door telkens de status op te vragen.
+builder.Services.AddHttpClient("beeld", c => c.Timeout = TimeSpan.FromSeconds(30));
 
 var app = builder.Build();
 
@@ -195,6 +208,7 @@ app.MapPost("/api/chat", async (ChatRequest request, ProviderClient client, Requ
         result = await gate.RunGatedAsync(
             request.Provider,
             request.ServerUrl,
+            request.Model,
             () => client.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, vraag.Token),
             vraag.Token,
             () => wachtrij.Begonnen(vraag));
@@ -265,6 +279,7 @@ app.MapPost("/api/chat/stream", async (ChatRequest request, ProviderStream strea
         await foreach (var stukje in gate.RunGatedStreamAsync(
             request.Provider,
             request.ServerUrl,
+            request.Model,
             () => stream.ChatAsync(request.Provider, request.ServerUrl, request.Model, request.Messages, request.Temperature, aanroepToken),
             aanroepToken,
             () => wachtrij.Begonnen(vraag)))
@@ -339,6 +354,7 @@ app.MapPost("/api/embed", async (EmbedRequest request, ProviderClient client, Re
         result = await gate.RunGatedAsync(
             request.Provider,
             request.ServerUrl,
+            request.Model,
             () => client.EmbedAsync(request.Provider, request.ServerUrl, request.Model, request.Text, vraag.Token),
             vraag.Token,
             () => wachtrij.Begonnen(vraag));
@@ -421,6 +437,18 @@ app.MapGet("/api/hermes", async (HermesConfigStore hermes, CancellationToken ct)
 
 app.MapPut("/api/hermes", async (HermesInstelling instelling, HermesConfigStore hermes, CancellationToken ct) =>
     Results.Ok(await hermes.BewaarAsync(instelling, ct)));
+
+// --- Goose -----------------------------------------------------------------
+// Voor de Goose-kaart in Jabasoft: welk Jabasoft-model Goose gebruikt.
+app.MapGet("/api/goose", async (GooseConfigStore goose, CancellationToken ct) =>
+    Results.Ok(await goose.LeesAsync(ct)));
+
+app.MapPut("/api/goose", async (GooseInstelling instelling, GooseConfigStore goose, CancellationToken ct) =>
+    Results.Ok(await goose.BewaarAsync(instelling, ct)));
+
+// Het doorgeefluik naar LM Studio voor Hermes (/v1/...), via dezelfde
+// wachtrij als de apps - zie HermesProxy.
+HermesProxy.Map(app);
 
 // --- MCP ------------------------------------------------------------------
 // Het endpoint voor AI-agents. Alleen op localhost, net als de rest: van

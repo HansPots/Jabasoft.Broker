@@ -127,9 +127,29 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
         // doorgegeven, dan niet meer: die zou dubbel komen.
         var stappen = OllamaDefaults.StappenVanaf(OllamaDefaults.BeginContext(messages, model));
 
+        ChatStreamChunk? vorigSlot = null;
+
         for (var i = 0; i < stappen.Count; i++)
         {
-            var (beheerd, laadfout) = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            bool beheerd;
+            string? laadfout;
+            var magNietHerladen = false;
+            try
+            {
+                (beheerd, laadfout) = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            }
+            catch (RequestGate.AlleenNodigException) when (vorigSlot is not null)
+            {
+                // Er lopen nu andere vragen op dit model, dus groter herladen kan niet: het eerste antwoord geldt.
+                (beheerd, laadfout) = (false, null);
+                magNietHerladen = true;
+            }
+
+            if (magNietHerladen)
+            {
+                yield return vorigSlot!;
+                yield break;
+            }
 
             if (laadfout is not null)
             {
@@ -156,6 +176,7 @@ internal sealed class ProviderStream(IHttpClientFactory httpClientFactory)
                 if (beheerd && stukje.Done && !zagTekst && stukje.ErrorMessage is null && i < stappen.Count - 1)
                 {
                     opnieuw = true;
+                    vorigSlot = stukje;
                     break;
                 }
 

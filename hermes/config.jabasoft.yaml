@@ -21,17 +21,20 @@ model:
 # eigen machine. LM Studio moet draaien op poort 1234 en deze modellen moeten
 # met minstens 64.000 tokens context geladen zijn (Hermes weigert minder).
 auxiliary:
+  # provider is nodig: zonder provider negeert Hermes de base_url (auto).
   compression:
-    model: "qwen/qwen3-14b"
+    provider: lmstudio
+    model: "qwen3-vl-8b-instruct"
     base_url: "http://localhost:1234/v1"
   vision:
+    provider: lmstudio
     model: "qwen3-vl-8b-instruct"
     base_url: "http://localhost:1234/v1"
 
 # --- Reserve als Claude niet bereikbaar is (limiet, storing) --------------
 fallback_providers:
   - provider: lmstudio
-    model: "qwen/qwen3-14b"
+    model: "qwen3-vl-8b-instruct"
     base_url: "http://localhost:1234/v1"
 
 # --- Jabasoft als gereedschap --------------------------------------------
@@ -40,5 +43,5 @@ fallback_providers:
 mcp_servers:
   jabasoft:
     url: "http://localhost:5310/mcp"
-    timeout: 120
+    timeout: 600
     connect_timeout: 15

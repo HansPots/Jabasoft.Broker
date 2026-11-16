@@ -17,8 +17,9 @@ namespace Jabasoft.Broker;
 ///
 /// Eén groot model tegelijk: moet er een ANDER chat-, code- of beeldmodel geladen worden, dan gaan de grote modellen
 /// die automatisch geladen zijn eerst uit het geheugen. Twee modellen van 6-9 GB passen niet samen in 12 GB
-/// videogeheugen, en dan mislukt het laden van de tweede. Omdat de broker toch één vraag tegelijk doorlaat (zie
-/// RequestGate), staat er op dat moment niets op die modellen te wachten. Embeddingmodellen zijn klein en blijven staan.
+/// videogeheugen, en dan mislukt het laden van de tweede. Laden en herladen mag alleen een vraag die er alleen op
+/// zit (RequestGate.ProbeerHerlaadrecht), dus er staat op dat moment niets op die modellen te wachten. Lopen er al
+/// vragen op hetzelfde model, dan moet het model passen zoals het staat. Embeddingmodellen zijn klein en blijven staan.
 /// </summary>
 internal static class LmStudioContext
 {
@@ -50,7 +51,17 @@ internal static class LmStudioContext
         await Slot.WaitAsync(cancellationToken);
         try
         {
+            // Lopen er nog andere vragen op dit model, dan mag er niets herladen worden: dan moet het passen zoals
+            // het staat, of wacht deze vraag tot hij alleen is (zie RequestGate). Te groot geladen is dan prima.
+            using var herlaadrecht = RequestGate.ProbeerHerlaadrecht(model);
             var geladen = await ZoekGeladenAsync(model, cancellationToken);
+
+            if (herlaadrecht is null)
+            {
+                return geladen is not null && geladen.Context >= context
+                    ? (true, null)
+                    : throw new RequestGate.AlleenNodigException();
+            }
 
             if (geladen is not null && Past(geladen, context))
             {
@@ -74,7 +85,7 @@ internal static class LmStudioContext
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is not RequestGate.AlleenNodigException)
         {
             // lms ontbreekt, hangt of geeft een fout: dan doet LM Studio het zelf, zoals voor deze functie bestond.
             return (false, null);
@@ -89,6 +100,97 @@ internal static class LmStudioContext
     /// Is het geladen model goed genoeg? Te klein: nooit. Te groot: alleen een model dat wij (of LM Studio zelf)
     /// geladen hebben wordt kleiner herladen; een handmatig geladen model laten we staan.
     /// </summary>
+    /// <summary>
+    /// Haalt alle modellen uit LM Studio - om de videokaart vrij te maken voor iets anders (tekenen via de
+    /// beeldservice van ImageFunn, zie BeeldTools). Zonder `lms` gebeurt er niets.
+    /// </summary>
+    public static async Task OntlaadAllesAsync(CancellationToken cancellationToken)
+    {
+        if (Lms is null)
+        {
+            return;
+        }
+
+        await Slot.WaitAsync(cancellationToken);
+        try
+        {
+            await VoerUitAsync("unload --all", cancellationToken);
+        }
+        finally
+        {
+            Slot.Release();
+        }
+    }
+
+    /// <summary>
+    /// Hoeveel vragen het geladen model tegelijk aankan: de "Max Concurrent" waarmee het in LM Studio geladen staat
+    /// (`parallel` in `lms ps`). Null als dat niet te lezen is (geen lms, model niet geladen).
+    /// </summary>
+    public static async Task<int?> ParallelAsync(string model, CancellationToken cancellationToken)
+    {
+        if (Lms is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var (gelukt, uitvoer) = await LeesAsync("ps --json", cancellationToken);
+            if (!gelukt || string.IsNullOrWhiteSpace(uitvoer))
+            {
+                return null;
+            }
+
+            using var document = JsonDocument.Parse(uitvoer);
+            foreach (var item in document.RootElement.EnumerateArray())
+            {
+                var sleutel = item.TryGetProperty("modelKey", out var k) ? k.GetString() : null;
+                var identifier = item.TryGetProperty("identifier", out var i) ? i.GetString() : null;
+
+                if (string.Equals(sleutel, model, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(identifier, model, StringComparison.OrdinalIgnoreCase))
+                {
+                    return item.TryGetProperty("parallel", out var p) && p.TryGetInt32(out var waarde) && waarde > 0 ? waarde : null;
+                }
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Met hoeveel context dit model NU in LM Studio geladen staat (`lms ps`), of 0 als het niet geladen is of dat
+    /// niet te lezen is. Voor de Goose-kaart: zo zie je of de context al meegegroeid is.
+    /// </summary>
+    public static async Task<int> GeladenContextAsync(string model, CancellationToken cancellationToken)
+    {
+        if (Lms is null || string.IsNullOrWhiteSpace(model))
+        {
+            return 0;
+        }
+
+        try
+        {
+            return (await ZoekGeladenAsync(model, cancellationToken))?.Context ?? 0;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+
     private static bool Past(Geladen geladen, int nodig)
     {
         if (geladen.Context < nodig)

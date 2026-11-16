@@ -133,7 +133,17 @@ internal sealed class ProviderClient(IHttpClientFactory httpClientFactory)
 
         for (var i = 0; i < stappen.Count; i++)
         {
-            var (beheerd, laadfout) = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            bool beheerd;
+            string? laadfout;
+            try
+            {
+                (beheerd, laadfout) = await LmStudioContext.ZorgVoorAsync(model, stappen[i], cancellationToken);
+            }
+            catch (RequestGate.AlleenNodigException) when (laatste is not null)
+            {
+                // Er lopen nu andere vragen op dit model, dus groter herladen kan niet: het eerste antwoord geldt.
+                return laatste;
+            }
 
             if (laadfout is not null)
             {
