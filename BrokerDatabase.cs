@@ -29,10 +29,10 @@ internal static class BrokerDatabase
 
     public static void Voorbereiden(IServiceProvider diensten, IConfiguration configuration, ActivityLog log)
     {
-        diensten.GetRequiredService<AiDbContext>().Database.Migrate();
-
         try
         {
+            diensten.GetRequiredService<AiDbContext>().Database.Migrate();
+
             using var verbinding = new SqlConnection(Verbinding(configuration));
             verbinding.Open();
 
@@ -51,8 +51,9 @@ internal static class BrokerDatabase
         }
         catch (Exception fout)
         {
-            // De broker moet ook zonder overzetting kunnen draaien: de tokentabel
-            // meldt dan zelf dat hij ontbreekt, en zoeken vindt nog niets.
+            // De broker moet ook zonder database kunnen draaien (chat werkt dan
+            // gewoon): de tokentabel meldt zelf dat hij ontbreekt, zoeken vindt
+            // niets, en bij de volgende start wordt het opnieuw geprobeerd.
             log.Add("broker", $"Database {Naam} niet volledig voorbereid: {fout.Message}");
         }
     }
