@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Een pictogram in het systeemvak om Jabasoft.Broker te starten en te
+       stoppen. Los van de broker zelf (die is een webproject) en los van
+       Jabasoft, zodat het er altijd staat - ook als er geen app draait.
+       Hoort NIET in JabasoftApps.ProcessNames: dan zouden de apps denken dat
+       er nog een familie-app draait en de broker nooit meer opruimen. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>Jabasoft.BrokerTray</RootNamespace>
+
+    <!-- Elke wijziging: laatste cijfer +1. -->
+    <Version>0.1.0.4</Version>
+
+    <!-- Het JS-pictogram van Jabasoft (kopie van Jabasoft.App\Jabasoft.ico): voor het exe-bestand, en als basis
+         voor het pictogram in het systeemvak (zie BrokerTray.Maak, dat er een statusbolletje op zet). -->
+    <ApplicationIcon>Jabasoft.ico</ApplicationIcon>
+
+    <!-- Zie Jabasoft.Broker.csproj: elke build een ander bestand, voor Smart App Control. -->
+    <Deterministic>false</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Jabasoft.ico" LogicalName="Jabasoft.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- De projectmap van de broker (voor Beheer\Broker-starten.ps1), bij het bouwen vastgelegd in plaats van
+         uitgeschreven - zelfde aanpak als ProjectMap in Jabasoft.Base. -->
+    <AssemblyMetadata Include="BrokerMap" Value="$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))" />
+  </ItemGroup>
+
+</Project>

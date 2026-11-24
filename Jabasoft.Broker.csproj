@@ -5,13 +5,21 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Jabasoft.Broker</RootNamespace>
-    <Version>0.1.0.17</Version>
+    <Version>0.1.0.22</Version>
     <!-- Niet-deterministisch: elke build geeft een ander bestand. Smart App
          Control onthoudt zijn oordeel per bestand (hash); is Ã©Ã©n build ooit
          geblokkeerd, dan zou een deterministische herbouw van dezelfde code
          precies dat geblokkeerde bestand opnieuw opleveren. -->
     <Deterministic>false</Deterministic>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Tray\ is een eigen project (het pictogram in het systeemvak), geen onderdeel van de broker. -->
+    <Compile Remove="Tray\**" />
+    <Content Remove="Tray\**" />
+    <None Remove="Tray\**" />
+    <EmbeddedResource Remove="Tray\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Jabasoft.Base\Jabasoft.Base.csproj" />

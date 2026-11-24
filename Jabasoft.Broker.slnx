@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="Jabasoft.Broker.csproj" />
+  <Project Path="Tray/Jabasoft.BrokerTray.csproj" />
 </Solution>

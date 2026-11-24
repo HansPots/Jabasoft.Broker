@@ -72,16 +72,21 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
             provider = "lmstudio";
         }
 
+        // Op Ollama staan de modellen in de broker-instelling (zie BewaarAsync); config.yaml houdt de LM Studio-namen.
+        var ollama = aiSettings.Current.Provider == AiProvider.Ollama ? aiSettings.Current.Ollama : null;
+        var hoofdmodel = Tekst(model, "default") is { Length: > 0 } standaard ? standaard : Tekst(model, "model");
+        var lokaalModel = Tekst(compressie, "model") is { Length: > 0 } bijtaak ? bijtaak : Tekst(vision, "model");
+
         return new HermesStatus(
             Geinstalleerd: true,
             GatewayDraait: GatewayDraait(),
             HermesMap: HermesMap,
             Provider: provider,
-            Model: Tekst(model, "default") is { Length: > 0 } standaard ? standaard : Tekst(model, "model"),
+            Model: ollama is not null && IsLokaal(provider) ? ollama.HermesModel : hoofdmodel,
             Sleutel: SleutelStatus(provider),
             // Bij een cloud-hoofdmodel staat het lokale model bij compression; bij een lokaal hoofdmodel alleen
             // bij vision (zie BewaarAsync).
-            LokaalModel: Tekst(compressie, "model") is { Length: > 0 } bijtaak ? bijtaak : Tekst(vision, "model"),
+            LokaalModel: ollama is not null ? ollama.HermesLokaalModel : lokaalModel,
             LokaalServerUrl: LokaalServerUrl,
             JabasoftMcp: Map(root, "mcp_servers")?.Children.ContainsKey(new YamlScalarNode("jabasoft")) == true,
             LokaleModellen: lokaleModellen,
@@ -176,6 +181,20 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
             return HermesStatus.Leeg with { HermesMap = HermesMap, Melding = "Hermes Agent is niet geïnstalleerd (geen map " + HermesMap + ")." };
         }
 
+        // Op Ollama: de lokale modellen gaan in de broker-instelling, en in config.yaml blijven de LM Studio-namen
+        // staan - die heeft de broker weer nodig als de chatserver terug naar LM Studio gaat. Hermes stuurt die
+        // naam mee; de broker zet er het Ollama-model voor in de plaats (HermesProxy.KiesModel).
+        var opOllama = aiSettings.Current.Provider == AiProvider.Ollama;
+        if (opOllama)
+        {
+            var huidig = aiSettings.Current;
+            aiSettings.Save(huidig.With(AiProvider.Ollama, huidig.Ollama with
+            {
+                HermesModel = IsLokaal(nieuw.Provider) ? nieuw.Model.Trim() : huidig.Ollama.HermesModel,
+                HermesLokaalModel = nieuw.LokaalModel.Trim(),
+            }));
+        }
+
         try
         {
             lock (Slot)
@@ -185,7 +204,22 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
                 // --- Hoofdmodel -------------------------------------------
                 var model = ZorgVoorMap(root, "model");
                 var helemaalLokaal = IsLokaal(nieuw.Provider);
-                Zet(model, "default", nieuw.Model.Trim());
+                var vorigeLokaal = Tekst(Map(Map(root, "auxiliary"), "compression"), "model") is { Length: > 0 } bijtaak
+                    ? bijtaak
+                    : Tekst(Map(Map(root, "auxiliary"), "vision"), "model");
+
+                // Op Ollama: een lokaal hoofdmodel houdt in config.yaml zijn LM Studio-naam (zie hierboven); een
+                // cloudmodel is van geen van beide servers en gaat er gewoon in.
+                if (!opOllama || !helemaalLokaal)
+                {
+                    Zet(model, "default", nieuw.Model.Trim());
+                }
+                else if (!string.Equals(Tekst(model, "base_url").TrimEnd('/'), BrokerV1Url, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Was het hoofdmodel een cloudmodel, dan staat er geen LM Studio-naam: neem het chatmodel van
+                    // LM Studio, zodat terugwisselen naar LM Studio meteen werkt.
+                    Zet(model, "default", aiSettings.Current.LmStudio.ChatModel);
+                }
 
                 if (helemaalLokaal)
                 {
@@ -220,6 +254,13 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
                 // gpt-oss). De broker wisselt de twee dan om de beurt.
                 var auxiliary = ZorgVoorMap(root, "auxiliary");
                 var lokaal = nieuw.LokaalModel.Trim();
+
+                // Op Ollama de LM Studio-naam laten staan (zie boven). Was er nog geen, dan de Ollama-naam: wel of
+                // geen lokaal model moet Hermes hoe dan ook weten, en de broker vervangt de naam toch.
+                if (opOllama && lokaal.Length > 0 && vorigeLokaal.Length > 0)
+                {
+                    lokaal = vorigeLokaal;
+                }
 
                 if (helemaalLokaal)
                 {
@@ -486,6 +527,14 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
     /// </summary>
     public async Task<IReadOnlyList<HermesLokaalModel>> LokaleModellenAsync(CancellationToken ct)
     {
+        // Staat de chatserver op Ollama, dan de modellen van Ollama: daar praten Goose en Hermes dan mee.
+        if (aiSettings.Current.Provider == AiProvider.Ollama)
+        {
+            return [.. (await OllamaContext.ModellenAsync(aiSettings.Current.Ollama.Url, ct))
+                .Select(m => new HermesLokaalModel(m.Naam, m.Max, m.KanBeelden))
+                .OrderBy(m => m.Naam, StringComparer.OrdinalIgnoreCase)];
+        }
+
         try
         {
             var http = httpClients.CreateClient("catalog");

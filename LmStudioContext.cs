@@ -12,11 +12,12 @@ namespace Jabasoft.Broker;
 /// via LM Studio's opdrachtregelprogramma `lms`. Dat doet alleen iets als `lms` er is; zonder laat de broker
 /// alles aan LM Studio over, zoals voorheen.
 ///
-/// Wat we NIET aanraken: een model dat iemand zelf in LM Studio geladen heeft (herkenbaar aan het ontbreken van een
-/// automatische ontlaadtijd). Zo'n model blijft zoals het is, tenzij zijn context te klein is voor de aanvraag.
+/// Een model dat iemand zelf in LM Studio geladen heeft (herkenbaar aan het ontbreken van een automatische
+/// ontlaadtijd) wordt niet kleiner herladen; wel groter als zijn context te klein is voor de aanvraag.
 ///
-/// Eén groot model tegelijk: moet er een ANDER chat-, code- of beeldmodel geladen worden, dan gaan de grote modellen
-/// die automatisch geladen zijn eerst uit het geheugen. Twee modellen van 6-9 GB passen niet samen in 12 GB
+/// Eén groot model tegelijk: bij elke vraag gaan ALLE andere chat-, code- en beeldmodellen uit het geheugen, ook
+/// die zonder ontlaadtijd (handmatig of door een programma buiten de broker om geladen - LM Studio geeft die geen
+/// ontlaadtijd, en dan bleven ze naast het nieuwe model in het videogeheugen staan). Twee modellen van 6-9 GB passen niet samen in 12 GB
 /// videogeheugen, en dan mislukt het laden van de tweede. Laden en herladen mag alleen een vraag die er alleen op
 /// zit (RequestGate.ProbeerHerlaadrecht), dus er staat op dat moment niets op die modellen te wachten. Lopen er al
 /// vragen op hetzelfde model, dan moet het model passen zoals het staat. Embeddingmodellen zijn klein en blijven staan.
@@ -65,6 +66,13 @@ internal static class LmStudioContext
 
             if (geladen is not null && Past(geladen, context))
             {
+                // Het model staat goed, maar er kan nog een ander naast staan (bijvoorbeeld door een programma
+                // buiten de broker om geladen): ook dan dat andere eruit.
+                foreach (var ander in await AndereGroteModellenAsync(model, cancellationToken))
+                {
+                    await VoerUitAsync($"unload \"{ander}\"", cancellationToken);
+                }
+
                 return (true, null);
             }
 
@@ -77,6 +85,10 @@ internal static class LmStudioContext
             {
                 await VoerUitAsync($"unload \"{ander}\"", cancellationToken);
             }
+
+            // Ook wat de broker in Ollama geladen had (na een wissel van chatserver): dat zit anders nog in het
+            // videogeheugen tot Ollama het na 5 minuten zelf opruimt.
+            await OllamaContext.OntlaadOnzeAsync(cancellationToken);
 
             var (gelukt, uitvoer) = await LeesAsync($"load \"{model}\" -c {context} --ttl {OntlaadNaSeconden} -y", cancellationToken, metFouten: true);
             return gelukt ? (true, null) : (false, Laadfout(model, uitvoer));
@@ -115,6 +127,35 @@ internal static class LmStudioContext
         try
         {
             await VoerUitAsync("unload --all", cancellationToken);
+        }
+        finally
+        {
+            Slot.Release();
+        }
+    }
+
+    /// <summary>
+    /// Haalt alle grote modellen (chat, code, beeld) uit LM Studio's geheugen, embeddingmodellen niet - voordat Ollama
+    /// een model laadt (zie OllamaContext). Zonder `lms` niets.
+    /// </summary>
+    public static async Task OntlaadGroteAsync(CancellationToken cancellationToken)
+    {
+        if (Lms is null)
+        {
+            return;
+        }
+
+        await Slot.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var model in await AndereGroteModellenAsync(string.Empty, cancellationToken))
+            {
+                await VoerUitAsync($"unload \"{model}\"", cancellationToken);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // lms hangt of geeft een fout: dan ruimt LM Studio het na zijn ontlaadtijd zelf op.
         }
         finally
         {
@@ -230,8 +271,8 @@ internal static class LmStudioContext
     }
 
     /// <summary>
-    /// De grote modellen (chat, code, beeld) die nu automatisch geladen staan, behalve <paramref name="model"/> zelf.
-    /// Handmatig geladen modellen (zonder ontlaadtijd) en embeddingmodellen tellen niet mee.
+    /// De grote modellen (chat, code, beeld) die nu geladen staan, behalve <paramref name="model"/> zelf - ook die
+    /// zonder ontlaadtijd (handmatig of buiten de broker om geladen). Embeddingmodellen tellen niet mee.
     /// </summary>
     private static async Task<List<string>> AndereGroteModellenAsync(string model, CancellationToken cancellationToken)
     {
@@ -248,9 +289,8 @@ internal static class LmStudioContext
             var soort = item.TryGetProperty("type", out var s) ? s.GetString() : null;
             var sleutel = item.TryGetProperty("modelKey", out var k) ? k.GetString() : null;
             var identifier = item.TryGetProperty("identifier", out var i) ? i.GetString() : null;
-            var heeftTtl = item.TryGetProperty("ttlMs", out var t) && t.ValueKind == JsonValueKind.Number;
 
-            if (!string.Equals(soort, "llm", StringComparison.OrdinalIgnoreCase) || !heeftTtl || identifier is null ||
+            if (!string.Equals(soort, "llm", StringComparison.OrdinalIgnoreCase) || identifier is null ||
                 string.Equals(sleutel, model, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(identifier, model, StringComparison.OrdinalIgnoreCase))
             {

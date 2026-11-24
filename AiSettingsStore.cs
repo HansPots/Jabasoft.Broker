@@ -74,10 +74,12 @@ public sealed class AiSettingsStore
     {
         ArgumentNullException.ThrowIfNull(settings);
 
-        var schoon = Normaliseer(settings);
-
         lock (_slot)
         {
+            // Een app die het zoekveld nog niet kent (oud gebouwd) stuurt null mee: dan blijft staan wat er stond,
+            // in plaats van dat het zoeken stilletjes met de chatserver meewisselt.
+            var schoon = Normaliseer(settings with { ZoekProvider = settings.ZoekProvider ?? _current.ZoekSoort });
+
             _current = schoon;
 
             try
@@ -103,6 +105,8 @@ public sealed class AiSettingsStore
         MinimumSemanticScore = Math.Clamp(settings.MinimumSemanticScore, 0, 1),
         MaxContextRondes = Math.Clamp(settings.MaxContextRondes, 0, 5),
         ChatTimeoutSeconden = Math.Clamp(settings.ChatTimeoutSeconden, 60, 3600),
+        // Vastzetten: een instelling van vóór de splitsing zoekt op de soort die toen gekozen was.
+        ZoekProvider = settings.ZoekProvider ?? settings.Provider,
     };
 
     /// <summary>
@@ -135,6 +139,9 @@ public sealed class AiSettingsStore
             Favorieten = null,
             FavorietenPerOnderdeel = NormaliseerFavorietenPerOnderdeel(server.FavorietenPerOnderdeel, NormaliseerFavorieten(server.Favorieten)),
             Verborgen = NormaliseerFavorieten(server.Verborgen),
+            GooseModel = server.GooseModel?.Trim() ?? string.Empty,
+            HermesModel = server.HermesModel?.Trim() ?? string.Empty,
+            HermesLokaalModel = server.HermesLokaalModel?.Trim() ?? string.Empty,
         };
     }
 

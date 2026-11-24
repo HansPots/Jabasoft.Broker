@@ -40,7 +40,8 @@ internal sealed class McpTools(
             Provider = huidig.Provider.ToString(),
             ServerUrl = huidig.ActiveServerUrl,
             ChatModel = huidig.Active.ChatModel,
-            EmbeddingModel = huidig.Active.EmbedModel,
+            ZoekProvider = huidig.ZoekSoort.ToString(),
+            EmbeddingModel = huidig.ZoekModel,
             Database = database,
             VragenInWachtrij = wachtrij.Lijst().Count,
         };
@@ -95,7 +96,7 @@ internal sealed class McpTools(
         }
 
         var huidig = settings.Current;
-        if (string.IsNullOrWhiteSpace(huidig.Active.EmbedModel))
+        if (string.IsNullOrWhiteSpace(huidig.ZoekModel))
         {
             return new SemanticSearchResult(false, [], "Er staat geen embeddingmodel ingesteld (Jabasoft, AI-instellingen).");
         }
@@ -103,9 +104,9 @@ internal sealed class McpTools(
         var index = scope.ServiceProvider.GetRequiredService<SearchIndexStore>();
         return await index.SearchAsync(
             new SemanticSearchRequest(
-                huidig.Provider,
-                huidig.ActiveServerUrl,
-                huidig.Active.EmbedModel,
+                huidig.ZoekSoort,
+                huidig.ZoekServerUrl,
+                huidig.ZoekModel,
                 project,
                 vraag,
                 Toepassing,

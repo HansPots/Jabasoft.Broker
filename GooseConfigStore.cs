@@ -20,7 +20,7 @@ namespace Jabasoft.Broker;
 ///
 /// Vóór elke wijziging gaat er een kopie naar *.jabasoft-backup.
 /// </summary>
-internal sealed class GooseConfigStore(HermesConfigStore hermes, ActivityLog log)
+internal sealed class GooseConfigStore(HermesConfigStore hermes, AiSettingsStore aiSettings, ActivityLog log)
 {
     /// <summary>De naam van de provider die naar de broker wijst (zie jabasoft.json).</summary>
     private const string Provider = "jabasoft";
@@ -165,6 +165,16 @@ internal sealed class GooseConfigStore(HermesConfigStore hermes, ActivityLog log
         var providerMap = Map(Map(root, "providers"), provider);
         var model = Tekst(providerMap, "model");
 
+        // Op Ollama staat Goose' model in de broker-instelling (zie BewaarAsync).
+        var instelling = aiSettings.Current;
+        if (instelling.Provider == AiProvider.Ollama)
+        {
+            var ollamaModel = instelling.Ollama.GooseModel;
+            return new GooseStatus(true, Draait(), ConfigMap, provider, ollamaModel, lokaleModellen,
+                MaxContext: IngesteldeMaxContext(),
+                GeladenContext: OllamaContext.GeladenContext(ollamaModel));
+        }
+
         return new GooseStatus(
             Geinstalleerd: true,
             Draait: Draait(),
@@ -195,6 +205,34 @@ internal sealed class GooseConfigStore(HermesConfigStore hermes, ActivityLog log
         var grens = nieuw.MaxContext > 0 ? nieuw.MaxContext : IngesteldeMaxContext();
         var maxContext = lokaleModellen.FirstOrDefault(m => string.Equals(m.Naam, model, StringComparison.OrdinalIgnoreCase))?.MaxContext ?? 0;
         var context = maxContext > 0 ? Math.Min(maxContext, grens) : grens;
+
+        // Op Ollama: het model gaat in de broker-instelling, Goose' config houdt zijn LM Studio-model (nodig als de
+        // chatserver terug naar LM Studio gaat; Goose stuurt die naam en de broker zet er het Ollama-model voor in de
+        // plaats). De grens wel in jabasoft.json, bij dat LM Studio-model: daar kijkt Goose naar om samen te vatten.
+        if (aiSettings.Current.Provider == AiProvider.Ollama)
+        {
+            var huidig = aiSettings.Current;
+            aiSettings.Save(huidig.With(AiProvider.Ollama, huidig.Ollama with { GooseModel = model }));
+
+            try
+            {
+                var gooseModel = IngesteldModel();
+                if (gooseModel.Length > 0)
+                {
+                    lock (Slot)
+                    {
+                        ZorgDatModelInLijstStaat(gooseModel, context);
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                log.Add("broker", $"Goose-grens niet bewaard: {ex.Message}");
+            }
+
+            log.Add("broker", $"Goose ingesteld voor Ollama: '{model}' ({context:N0} tokens context)");
+            return await LeesAsync(ct);
+        }
 
         try
         {

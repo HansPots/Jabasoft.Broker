@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Jabasoft.Base.AiBroker;
@@ -32,6 +32,20 @@ internal static class HermesProxy
 {
     /// <summary>De context waarmee het model voor Hermes in elk geval geladen wordt - Hermes weigert minder dan 64.000.</summary>
     public const int BeginContext = 65_536;
+
+    /// <summary>
+    /// Goose stelt die eis niet: dat begint kleiner, scheelt videogeheugen bij een kort gesprek. Daarboven gelden
+    /// dezelfde stappen (<see cref="Stap"/>).
+    /// </summary>
+    public const int GooseBeginContext = 32_768;
+
+    /// <summary>De kleinste context voor deze aanvrager: Goose 32K, de rest (Hermes) 64K.</summary>
+    private static int BeginVoor(string aanvrager) =>
+        string.Equals(aanvrager, Goose, StringComparison.Ordinal) ? GooseBeginContext : BeginContext;
+
+    /// <summary>Hoeveel context een model minstens moet aankunnen om voor deze aanvrager te mogen.</summary>
+    private static int MinimumVoor(string aanvrager) =>
+        string.Equals(aanvrager, Goose, StringComparison.Ordinal) ? GooseBeginContext : HermesStatus.MinimaleContext;
 
     /// <summary>
     /// Hoeveel de context per keer groeit. Elke groeistap is een herlaadbeurt (10-30 s, en LM Studio leest het
@@ -150,9 +164,38 @@ internal static class HermesProxy
     ///  - Iedereen anders (OpenClaw, eigen kopregel): ongewijzigd.
     ///
     /// Leeg of niet te lezen = het gevraagde model houden.
+    ///
+    /// Staat de chatserver op Ollama, dan komen de modellen uit de Ollama-instelling (AiServerSettings.GooseModel,
+    /// HermesModel, HermesLokaalModel), met het chatmodel van Ollama als terugval: de config van Goose en Hermes
+    /// houdt de LM Studio-namen, en die bestaan bij Ollama niet.
     /// </summary>
-    private static string KiesModel(string aanvrager, string gevraagd, string vraagTekst)
+    private static string KiesModel(string aanvrager, string gevraagd, string vraagTekst, AiSettings instelling)
     {
+        if (instelling.Provider == AiProvider.Ollama)
+        {
+            var ollama = instelling.Ollama;
+            static string Eerste(params string[] namen) => namen.FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? string.Empty;
+
+            if (string.Equals(aanvrager, Goose, StringComparison.Ordinal))
+            {
+                return Eerste(ollama.GooseModel, ollama.ChatModel, gevraagd);
+            }
+
+            if (string.Equals(aanvrager, "Hermes", StringComparison.Ordinal))
+            {
+                // Een beeldvraag naar het lokale model als dat er is; loopt Hermes' hoofdmodel niet via de broker
+                // (cloud), dan is alles wat hier binnenkomt een bijtaak - ook voor het lokale model.
+                if ((AfbeeldingData.IsMatch(vraagTekst) || HermesConfigStore.IngesteldeModellen() is null) && ollama.HermesLokaalModel.Length > 0)
+                {
+                    return ollama.HermesLokaalModel;
+                }
+
+                return Eerste(ollama.HermesModel, ollama.ChatModel, gevraagd);
+            }
+
+            return gevraagd;
+        }
+
         if (string.Equals(aanvrager, Goose, StringComparison.Ordinal))
         {
             return GooseConfigStore.IngesteldModel() is { Length: > 0 } gooseModel ? gooseModel : gevraagd;
@@ -171,7 +214,10 @@ internal static class HermesProxy
         return gevraagd;
     }
 
-    private static string LmStudioUrl(AiSettingsStore settings) => settings.Current.LmStudio.Url.TrimEnd('/');
+    /// <summary>Het adres van de chatserver die nu gekozen is (LM Studio of Ollama).</summary>
+    private static string ServerUrl(AiSettings instelling) => instelling.ActiveServerUrl.TrimEnd('/');
+
+    private static string ServerNaam(AiProvider provider) => provider == AiProvider.Ollama ? "Ollama" : "LM Studio";
 
     /// <summary>Tot waar de context mag meegroeien: de grens van de Goose-kaart voor Goose, anders die van de Hermes-kaart.</summary>
     private static int GrensVoor(HttpContext context) =>
@@ -192,10 +238,12 @@ internal static class HermesProxy
     /// </summary>
     private static async Task ModellenAsync(HttpContext context, IHttpClientFactory httpClients, AiSettingsStore settings)
     {
-        var lmStudio = settings.Current.LmStudio;
-        var ingesteld = KiesModel(AanvragerVan(context), string.Empty, string.Empty);
+        var instelling = settings.Current;
+        var aanvrager = AanvragerVan(context);
+        var ingesteld = KiesModel(aanvrager, string.Empty, string.Empty, instelling);
         var bruikbaar = (await BruikbareModellenMetMaxAsync(httpClients, settings, context.RequestAborted))
-            .Where(model => !lmStudio.IsVerborgen(model.Naam) || string.Equals(model.Naam, ingesteld, StringComparison.OrdinalIgnoreCase))
+            .Where(model => model.Max >= MinimumVoor(aanvrager))
+            .Where(model => !instelling.Active.IsVerborgen(model.Naam) || string.Equals(model.Naam, ingesteld, StringComparison.OrdinalIgnoreCase))
             .ToList();
         var grens = GrensVoor(context);
 
@@ -207,43 +255,47 @@ internal static class HermesProxy
             {
                 id = model.Naam,
                 @object = "model",
-                owned_by = "lmstudio",
+                owned_by = instelling.Provider == AiProvider.Ollama ? "ollama" : "lmstudio",
                 context_length = Math.Min(grens, model.Max),
             }),
         }));
     }
 
-    /// <summary>De namen van de LM Studio-modellen waar Hermes mee kan chatten (zie <see cref="ModellenAsync"/>).</summary>
-    private static async Task<List<string>> BruikbareModellenAsync(IHttpClientFactory httpClients, AiSettingsStore settings, CancellationToken ct) =>
-        [.. (await BruikbareModellenMetMaxAsync(httpClients, settings, ct)).Select(model => model.Naam)];
-
-    /// <summary>Dezelfde modellen, met de grootste context die elk aankan (max_context_length van LM Studio).</summary>
+    /// <summary>
+    /// De chatmodellen op de gekozen chatserver met de grootste context die elk aankan. Nog niet gefilterd op het
+    /// minimum van de aanvrager (zie <see cref="MinimumVoor"/>) - dat doen de aanroepers.
+    /// </summary>
     private static async Task<List<(string Naam, int Max)>> BruikbareModellenMetMaxAsync(IHttpClientFactory httpClients, AiSettingsStore settings, CancellationToken ct)
     {
         // Korte cache: dit loopt bij ELKE vraag van Hermes, en de lijst
-        // verandert zelden.
-        if (_bruikbaarCache is { } cache && DateTimeOffset.UtcNow - cache.Opgehaald < TimeSpan.FromSeconds(30))
+        // verandert zelden. Per server: na een wissel geldt de oude lijst niet.
+        var instelling = settings.Current;
+        var sleutel = instelling.Provider + " " + ServerUrl(instelling);
+        if (_bruikbaarCache is { } cache && cache.Sleutel == sleutel && DateTimeOffset.UtcNow - cache.Opgehaald < TimeSpan.FromSeconds(30))
         {
             return cache.Modellen;
         }
 
-        var modellen = await HaalBruikbareModellenAsync(httpClients, settings, ct);
+        var modellen = instelling.Provider == AiProvider.Ollama
+            ? [.. (await OllamaContext.ModellenAsync(ServerUrl(instelling), ct)).Select(m => (m.Naam, m.Max))]
+            : await HaalBruikbareModellenAsync(httpClients, instelling, ct);
+
         if (modellen.Count > 0)
         {
-            _bruikbaarCache = (DateTimeOffset.UtcNow, modellen);
+            _bruikbaarCache = (sleutel, DateTimeOffset.UtcNow, modellen);
         }
 
         return modellen;
     }
 
-    private static (DateTimeOffset Opgehaald, List<(string Naam, int Max)> Modellen)? _bruikbaarCache;
+    private static (string Sleutel, DateTimeOffset Opgehaald, List<(string Naam, int Max)> Modellen)? _bruikbaarCache;
 
-    private static async Task<List<(string Naam, int Max)>> HaalBruikbareModellenAsync(IHttpClientFactory httpClients, AiSettingsStore settings, CancellationToken ct)
+    private static async Task<List<(string Naam, int Max)>> HaalBruikbareModellenAsync(IHttpClientFactory httpClients, AiSettings instelling, CancellationToken ct)
     {
         try
         {
             var http = httpClients.CreateClient("catalog");
-            using var antwoord = await http.GetAsync(LmStudioUrl(settings) + "/api/v0/models", ct);
+            using var antwoord = await http.GetAsync(ServerUrl(instelling) + "/api/v0/models", ct);
             if (!antwoord.IsSuccessStatusCode)
             {
                 return [];
@@ -260,7 +312,7 @@ internal static class HermesProxy
                 .Select(m => (
                     Naam: m.GetProperty("id").GetString() ?? string.Empty,
                     Max: m.TryGetProperty("max_context_length", out var max) && max.TryGetInt32(out var waarde) ? waarde : 0))
-                .Where(m => m.Max >= HermesStatus.MinimaleContext && m.Naam.Length > 0)];
+                .Where(m => m.Max > 0 && m.Naam.Length > 0)];
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException or KeyNotFoundException)
         {
@@ -291,7 +343,8 @@ internal static class HermesProxy
 
         // Live wisselen: het model van de Hermes- of Goose-kaart in plaats van
         // wat het programma bij het opstarten las (zie KiesModel).
-        var ingesteld = KiesModel(AanvragerVan(context), model, tekst);
+        var instelling = settings.Current;
+        var ingesteld = KiesModel(AanvragerVan(context), model, tekst, instelling);
         if (!string.Equals(ingesteld, model, StringComparison.OrdinalIgnoreCase))
         {
             // Eén regel per wissel, niet bij elke vraag: tot een herstart stuurt het programma steeds de oude naam.
@@ -310,10 +363,11 @@ internal static class HermesProxy
         // context) meteen weigeren, met een melding die zegt wat er mis is -
         // anders laadt de broker het voor niets en zegt LM Studio iets vaags.
         var metMax = await BruikbareModellenMetMaxAsync(httpClients, settings, context.RequestAborted);
-        var bruikbaar = metMax.Select(m => m.Naam).ToList();
+        var minimum = MinimumVoor(AanvragerVan(context));
+        var bruikbaar = metMax.Where(m => m.Max >= minimum).Select(m => m.Naam).ToList();
         if (bruikbaar.Count > 0 && !bruikbaar.Contains(model, StringComparer.OrdinalIgnoreCase))
         {
-            var melding = $"'{model}' is geen chatmodel met minstens 64.000 tokens context en kan niet voor Hermes gebruikt worden. Kies in Hermes (of in Jabasoft, Instellingen > Hermes) een van: {string.Join(", ", bruikbaar)}.";
+            var melding = $"'{model}' is op {ServerNaam(instelling.Provider)} geen chatmodel met minstens {minimum:N0} tokens context en kan niet voor {AanvragerVan(context)} gebruikt worden. Kies in Jabasoft (Instellingen > {AanvragerVan(context)}) een van: {string.Join(", ", bruikbaar)}.";
             log.Add("broker", $"{AanvragerVan(context)} via broker geweigerd: " + melding);
             await FoutAsync(context, 400, melding);
             return;
@@ -333,10 +387,12 @@ internal static class HermesProxy
         // zelf aankan. Onbekend model (lijst leeg, LM Studio even niet
         // bereikbaar): alleen de begincontext.
         var modelMax = metMax.FirstOrDefault(m => string.Equals(m.Naam, model, StringComparison.OrdinalIgnoreCase)).Max;
-        var maxContext = modelMax > 0 ? Math.Min(GrensVoor(context), modelMax) : BeginContext;
-
-        var serverUrl = LmStudioUrl(settings);
         var aanvrager = AanvragerVan(context);
+        var begin = BeginVoor(aanvrager);
+        var maxContext = modelMax > 0 ? Math.Min(GrensVoor(context), modelMax) : begin;
+
+        var provider = instelling.Provider;
+        var serverUrl = ServerUrl(instelling);
         var vraag = wachtrij.Aanmelden(aanvrager, aanvrager, model, "chat", context.RequestAborted);
         long promptTokens = 0;
         long completionTokens = 0;
@@ -345,18 +401,22 @@ internal static class HermesProxy
         try
         {
             fout = await gate.RunGatedAsync(
-                AiProvider.LmStudio,
+                provider,
                 serverUrl,
                 model,
                 async () =>
                 {
-                    var verzonden = vraagJson.ToJsonString();
-                    var laadfout = await LaadMetGenoegContextAsync(model, verzonden, vraagJson, maxContext, aanvrager, log, vraag.Token);
+                    var (laadfout, doel) = await LaadMetGenoegContextAsync(provider, serverUrl, model, vraagJson.ToJsonString(), vraagJson, begin, maxContext, aanvrager, log, vraag.Token);
                     if (laadfout is not null)
                     {
                         await FoutAsync(context, 503, laadfout);
                         return laadfout;
                     }
+
+                    // Bij Ollama de variant met de juiste context (zie OllamaContext); bij LM Studio het model zelf.
+                    vraagJson["model"] = doel;
+                    var verzonden = vraagJson.ToJsonString();
+
                     using var verzoek = new HttpRequestMessage(HttpMethod.Post, serverUrl + "/v1/chat/completions")
                     {
                         Content = new StringContent(verzonden, Encoding.UTF8, "application/json"),
@@ -401,7 +461,7 @@ internal static class HermesProxy
                         LeesVerbruik(inhoud, ref promptTokens, ref completionTokens);
                     }
 
-                    return antwoord.IsSuccessStatusCode ? null : $"LM Studio gaf {(int)antwoord.StatusCode}.";
+                    return antwoord.IsSuccessStatusCode ? null : $"{ServerNaam(provider)} gaf {(int)antwoord.StatusCode}.";
                 },
                 vraag.Token,
                 () => wachtrij.Begonnen(vraag));
@@ -440,16 +500,23 @@ internal static class HermesProxy
     /// <summary>
     /// Zorgt dat het model geladen staat met genoeg context voor deze vraag: de geschatte lengte van het hele
     /// gesprek plus ruimte voor het antwoord, afgerond naar boven op een <see cref="Stap"/>, minstens
-    /// <see cref="BeginContext"/> en hoogstens <paramref name="maxContext"/>. Staat het model al groot genoeg
-    /// geladen, dan gebeurt er niets (zie LmStudioContext.Past) - binnen een gesprek groeit de context dus alleen.
+    /// <paramref name="begin"/> (Goose 32K, Hermes 64K) en hoogstens <paramref name="maxContext"/>.
     ///
-    /// Past het niet in het videogeheugen, dan een stap kleiner, tot de begincontext. Wordt het gesprek dan
-    /// toch te lang, dan meldt LM Studio dat zelf en vat Hermes het gesprek samen. Null = geladen, anders de fout.
+    /// Staat het model al geladen met een stap die past en niet meer dan twee keer zo groot is als nodig, dan
+    /// gebeurt er niets - binnen een gesprek groeit de context dus alleen. Begint er na een lang gesprek een nieuw,
+    /// kort gesprek, dan gaat het model terug naar een kleinere stap (LmStudioContext.Past, OllamaContext).
+    ///
+    /// LM Studio laadt het model zelf met die context; bij Ollama wordt het een variant met die context, en die
+    /// naam komt terug als Doel. Past het niet in het videogeheugen, dan een stap kleiner, tot de begincontext.
+    /// Wordt het gesprek dan toch te lang, dan meldt de server dat zelf en vat Hermes/Goose het gesprek samen.
+    /// Fout null = geladen.
     /// </summary>
-    private static async Task<string?> LaadMetGenoegContextAsync(string model, string vraagTekst, JsonObject vraagJson, int maxContext, string aanvrager, ActivityLog log, CancellationToken ct)
+    private static async Task<(string? Fout, string Doel)> LaadMetGenoegContextAsync(
+        AiProvider provider, string serverUrl, string model, string vraagTekst, JsonObject vraagJson, int begin, int maxContext,
+        string aanvrager, ActivityLog log, CancellationToken ct)
     {
         var geschat = GeschatteTokens(vraagTekst, vraagJson);
-        var gewenst = Math.Clamp((int)Math.Ceiling(geschat / (double)Stap) * Stap, BeginContext, Math.Max(BeginContext, maxContext));
+        var gewenst = Math.Clamp((int)Math.Ceiling(geschat / (double)Stap) * Stap, begin, Math.Max(begin, maxContext));
 
         if (TeGroot.TryGetValue(model, out var teGroot))
         {
@@ -459,28 +526,39 @@ internal static class HermesProxy
             }
             else if (gewenst >= teGroot.Context)
             {
-                gewenst = Math.Max(BeginContext, teGroot.Context - Stap);
+                gewenst = Math.Max(begin, teGroot.Context - Stap);
             }
         }
 
         while (true)
         {
-            var (_, fout) = await LmStudioContext.ZorgVoorAsync(model, gewenst, ct);
+            string? fout;
+            var doel = model;
+
+            if (provider == AiProvider.Ollama)
+            {
+                (doel, fout) = await OllamaContext.ZorgVoorAsync(serverUrl, model, gewenst, ct);
+            }
+            else
+            {
+                (_, fout) = await LmStudioContext.ZorgVoorAsync(model, gewenst, ct);
+            }
+
             if (fout is null)
             {
-                if (LaatsteContext.TryGetValue(model, out var vorige) ? vorige != gewenst : gewenst > BeginContext)
+                if (LaatsteContext.TryGetValue(model, out var vorige) ? vorige != gewenst : gewenst > begin)
                 {
-                    log.Add("broker", $"{aanvrager}: {model} met minstens {gewenst:N0} tokens context (gesprek ongeveer {geschat:N0} tokens)");
+                    log.Add("broker", $"{aanvrager}: {model} met minstens {gewenst:N0} tokens context op {ServerNaam(provider)} (gesprek ongeveer {geschat:N0} tokens)");
                 }
 
                 LaatsteContext[model] = gewenst;
-                return null;
+                return (null, doel);
             }
 
             // Alleen bij een vol videogeheugen heeft kleiner proberen zin.
-            if (gewenst <= BeginContext || !fout.Contains("videogeheugen", StringComparison.Ordinal))
+            if (gewenst <= begin || !fout.Contains("videogeheugen", StringComparison.Ordinal))
             {
-                return fout;
+                return (fout, doel);
             }
 
             TeGroot[model] = (gewenst, DateTimeOffset.UtcNow);

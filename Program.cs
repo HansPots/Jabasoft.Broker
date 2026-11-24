@@ -147,7 +147,8 @@ app.MapPut("/api/settings", (AiSettings settings, AiSettingsStore store, Activit
 {
     var vorige = store.Current;
     var opgeslagen = store.Save(settings);
-    log.Add("broker", $"AI-instelling: {opgeslagen.Provider} op {opgeslagen.ActiveServerUrl}, chat '{opgeslagen.Active.ChatModel}', embedding '{opgeslagen.Active.EmbedModel}'");
+    log.Add("broker", $"AI-instelling: {opgeslagen.Provider} op {opgeslagen.ActiveServerUrl}, chat '{opgeslagen.Active.ChatModel}', " +
+                      $"zoeken via {opgeslagen.ZoekSoort} met '{opgeslagen.ZoekModel}'");
 
     // Wijzigt het embeddingmodel (of de server erachter), dan is elke tot
     // nu toe geïndexeerde vector niet meer vergelijkbaar met een vraag die
@@ -155,12 +156,15 @@ app.MapPut("/api/settings", (AiSettings settings, AiSettingsStore store, Activit
     // Op de achtergrond en met een eigen scope: dit antwoord mag niet
     // wachten tot alle projecten herindexeerd zijn, en de scope van dit
     // verzoek is straks weg voordat dat klaar is.
-    if (!string.IsNullOrWhiteSpace(opgeslagen.Active.EmbedModel) &&
-        (opgeslagen.Active.EmbedModel != vorige.Active.EmbedModel || opgeslagen.ActiveServerUrl != vorige.ActiveServerUrl))
+    //
+    // Alleen de ZOEKserver telt (ZoekProvider), niet de chatserver: wisselen
+    // tussen LM Studio en Ollama voor de chat laat de index dus heel.
+    if (!string.IsNullOrWhiteSpace(opgeslagen.ZoekModel) &&
+        (opgeslagen.ZoekModel != vorige.ZoekModel || opgeslagen.ZoekServerUrl != vorige.ZoekServerUrl || opgeslagen.ZoekSoort != vorige.ZoekSoort))
     {
-        var provider = opgeslagen.Provider;
-        var serverUrl = opgeslagen.ActiveServerUrl;
-        var model = opgeslagen.Active.EmbedModel;
+        var provider = opgeslagen.ZoekSoort;
+        var serverUrl = opgeslagen.ZoekServerUrl;
+        var model = opgeslagen.ZoekModel;
 
         _ = Task.Run(async () =>
         {
