@@ -27,9 +27,7 @@ namespace Jabasoft.Broker;
 /// </summary>
 public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog log)
 {
-    private string ConnectionString =>
-        configuration.GetConnectionString("JabasoftBase")
-        ?? throw new InvalidOperationException("Geen verbindingsreeks JabasoftBase in appsettings.json.");
+    private string ConnectionString => BrokerDatabase.Verbinding(configuration);
 
     /// <summary>
     /// Is de database er, en staat de tabel erin? Dit is waar de
@@ -51,7 +49,7 @@ public sealed class TokenUsageStore(IConfiguration configuration, ActivityLog lo
 
             return gevonden > 0
                 ? new TokenUsageStatus(true, null)
-                : new TokenUsageStatus(false, "Tabel TokenUsageEntries ontbreekt in JabasoftBase.");
+                : new TokenUsageStatus(false, "Tabel TokenUsageEntries ontbreekt in JabasoftBroker.");
         }
         catch (Exception ex)
         {

@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Jabasoft.Broker</RootNamespace>
-    <Version>0.1.0.22</Version>
+    <Version>0.1.0.23</Version>
     <!-- Niet-deterministisch: elke build geeft een ander bestand. Smart App
          Control onthoudt zijn oordeel per bestand (hash); is Ã©Ã©n build ooit
          geblokkeerd, dan zou een deterministische herbouw van dezelfde code

@@ -36,7 +36,7 @@ builder.Services.AddSingleton<ActivityLog>();
 builder.Services.AddSingleton<AiSettingsStore>();
 
 // Het tokenverbruik van elke aanroep, in de gedeelde tabel
-// JabasoftBase.dbo.TokenUsageEntries. Ook hier bij de broker, en om
+// JabasoftBroker.dbo.TokenUsageEntries. Ook hier bij de broker, en om
 // dezelfde reden: hij ziet alles langskomen, dus de apps hoeven zelf geen
 // databaseverbinding te hebben.
 builder.Services.AddSingleton<TokenUsageStore>();
@@ -50,13 +50,12 @@ builder.Services.AddSingleton<RequestGate>();
 // kan er een vraag mee annuleren - zie AiWachtrij.
 builder.Services.AddSingleton<AiWachtrij>();
 
-// De AI-database: JabasoftAi, een eigen database naast JabasoftBase en
-// JabasoftStylebook. AddDbContext (scoped) en niet AddSingleton: een
+// De database van de broker: JabasoftBroker (tokenverbruik + zoekindex),
+// zie BrokerDatabase. AddDbContext (scoped) en niet AddSingleton: een
 // DbContext is niet thread-safe en Minimal API maakt toch al een scope
 // per binnenkomend verzoek, dus dat past precies.
 builder.Services.AddDbContext<AiDbContext>(options => options.UseSqlServer(
-    builder.Configuration.GetConnectionString("JabasoftAi")
-    ?? throw new InvalidOperationException("ConnectionStrings:JabasoftAi ontbreekt in appsettings.json.")));
+    BrokerDatabase.Verbinding(builder.Configuration)));
 
 builder.Services.AddScoped<SearchIndexStore>();
 
@@ -82,17 +81,16 @@ builder.Services.AddHttpClient("beeld", c => c.Timeout = TimeSpan.FromSeconds(30
 
 var app = builder.Build();
 
-// De database (en de tabel erin) meteen op orde bij het opstarten - net
-// als Stylebook.Playground bij zijn eigen database doet. Bestaat de
-// database nog niet, dan wordt hij hier aangemaakt; bestaat hij al, dan
-// lopen alleen de migraties bij die nog niet toegepast zijn.
-using (var opstartScope = app.Services.CreateScope())
-{
-    opstartScope.ServiceProvider.GetRequiredService<AiDbContext>().Database.Migrate();
-}
-
 var activity = app.Services.GetRequiredService<ActivityLog>();
 activity.Add("broker", "Broker gestart");
+
+// De database meteen op orde bij het opstarten: JabasoftBroker aanmaken en
+// migreren, en bij de eerste keer de gegevens uit JabasoftBase en
+// JabasoftAi overnemen - zie BrokerDatabase.
+using (var opstartScope = app.Services.CreateScope())
+{
+    BrokerDatabase.Voorbereiden(opstartScope.ServiceProvider, app.Configuration, activity);
+}
 
 // Elke aanroep komt in het overzicht, behalve wat er AUTOMATISCH en
 // herhaald gevraagd wordt: /health, /logs en de modeltotalen achter het
