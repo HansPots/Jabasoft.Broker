@@ -168,6 +168,39 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
 
     private static (DateTime Gewijzigd, (string Hoofd, string Beeld)? Modellen)? _modelCache;
 
+    /// <summary>
+    /// Zet alleen het hoofdmodel in config.yaml op <paramref name="naam"/> - als het hoofdmodel via de broker loopt.
+    /// Voor een keuze die in Hermes zelf gemaakt is (zie HermesProxy.VolgHermesKeuze), zodat de Hermes-kaart die volgt.
+    /// De rest van het bestand blijft zoals het is. False als er niets veranderd is.
+    /// </summary>
+    public static bool ZetHoofdmodel(string naam)
+    {
+        try
+        {
+            lock (Slot)
+            {
+                var root = LaadRoot();
+                var model = Map(root, "model");
+                if (model is null ||
+                    !string.Equals(Tekst(model, "provider"), "custom", StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(Tekst(model, "base_url").TrimEnd('/'), BrokerV1Url, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(Tekst(model, "default"), naam, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                Zet(model, "default", naam);
+                SchrijfRoot(root);
+                _modelCache = null;
+                return true;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or YamlDotNet.Core.YamlException)
+        {
+            return false;
+        }
+    }
+
     private static int GrensUit(YamlMappingNode? model) =>
         int.TryParse(Tekst(model, "context_length"), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var waarde) &&
         waarde > HermesProxy.BeginContext

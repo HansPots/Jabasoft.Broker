@@ -128,6 +128,54 @@ internal static class HermesProxy
     /// <summary>Per aanvrager de laatst gelogde modelwissel - zie ChatAsync.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> LaatsteWissel = new(StringComparer.Ordinal);
 
+    private static readonly Lock HermesKeuzeSlot = new();
+
+    /// <summary>Het hoofdmodel dat Hermes bij zijn vorige vraag noemde - zie <see cref="VolgHermesKeuze"/>. Null = nog geen vraag sinds de start.</summary>
+    private static string? _hermesVorigeVraag;
+
+    /// <summary>
+    /// Wie het laatst wisselt, wint. Hermes stuurt bij elke vraag het model dat hij gebruikt: het model uit zijn config bij
+    /// het opstarten, of wat je daarna in Hermes zelf koos. Noemt Hermes ineens een ander (bruikbaar) model dan bij de
+    /// vorige vraag, dan heb je in Hermes gewisseld: dat model wordt het hoofdmodel in config.yaml, en dus ook op de
+    /// Hermes-kaart, zodat <see cref="KiesModel"/> het daarna gewoon gebruikt. Blijft Hermes dezelfde naam sturen terwijl
+    /// de kaart iets anders zegt, dan is er op de kaart gewisseld en wint de kaart (zoals voorheen).
+    ///
+    /// Niet voor beeldvragen of het beeldmodel (een bijtaak, geen wissel), niet op Ollama (daar staan de Hermes-modellen
+    /// in de broker-instelling) en niet bij de eerste vraag na een herstart van de broker: dan is er nog niets om mee te
+    /// vergelijken en gaat de kaart voor.
+    /// </summary>
+    private static void VolgHermesKeuze(string gevraagd, string vraagTekst, IReadOnlyCollection<string> bruikbaar, ActivityLog log)
+    {
+        if (HermesConfigStore.IngesteldeModellen() is not { } ingesteld)
+        {
+            return;
+        }
+
+        var (hoofd, beeld) = ingesteld;
+        if (AfbeeldingData.IsMatch(vraagTekst) || string.Equals(gevraagd, beeld, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        lock (HermesKeuzeSlot)
+        {
+            var vorige = _hermesVorigeVraag;
+            _hermesVorigeVraag = gevraagd;
+            if (vorige is null ||
+                string.Equals(vorige, gevraagd, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(gevraagd, hoofd, StringComparison.OrdinalIgnoreCase) ||
+                (bruikbaar.Count > 0 && !bruikbaar.Contains(gevraagd, StringComparer.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+        }
+
+        if (HermesConfigStore.ZetHoofdmodel(gevraagd))
+        {
+            log.Add("broker", $"Hermes koos zelf {gevraagd} (was {hoofd}): de broker volgt die keuze en zet hem op de Hermes-kaart");
+        }
+    }
+
     /// <summary>Waar de route de aanvrager vastlegt (zie <see cref="AanvragerVan"/>).</summary>
     private const string AanvragerItem = "Jabasoft.Aanvrager";
 
@@ -341,9 +389,21 @@ internal static class HermesProxy
             return;
         }
 
+        // Welke modellen bruikbaar zijn: nodig om een wissel in Hermes zelf te herkennen (VolgHermesKeuze) en om een
+        // onbruikbaar model hieronder te weigeren.
+        var instelling = settings.Current;
+        var metMax = await BruikbareModellenMetMaxAsync(httpClients, settings, context.RequestAborted);
+        var minimum = MinimumVoor(AanvragerVan(context));
+        var bruikbaar = metMax.Where(m => m.Max >= minimum).Select(m => m.Naam).ToList();
+
+        // Wie het laatst wisselt wint: in Hermes zelf gekozen gaat naar de Hermes-kaart (zie VolgHermesKeuze).
+        if (instelling.Provider != AiProvider.Ollama && string.Equals(AanvragerVan(context), "Hermes", StringComparison.Ordinal))
+        {
+            VolgHermesKeuze(model, tekst, bruikbaar, log);
+        }
+
         // Live wisselen: het model van de Hermes- of Goose-kaart in plaats van
         // wat het programma bij het opstarten las (zie KiesModel).
-        var instelling = settings.Current;
         var ingesteld = KiesModel(AanvragerVan(context), model, tekst, instelling);
         if (!string.Equals(ingesteld, model, StringComparison.OrdinalIgnoreCase))
         {
@@ -362,9 +422,6 @@ internal static class HermesProxy
         // Een model waar Hermes niet mee kan werken (embedding, te weinig
         // context) meteen weigeren, met een melding die zegt wat er mis is -
         // anders laadt de broker het voor niets en zegt LM Studio iets vaags.
-        var metMax = await BruikbareModellenMetMaxAsync(httpClients, settings, context.RequestAborted);
-        var minimum = MinimumVoor(AanvragerVan(context));
-        var bruikbaar = metMax.Where(m => m.Max >= minimum).Select(m => m.Naam).ToList();
         if (bruikbaar.Count > 0 && !bruikbaar.Contains(model, StringComparer.OrdinalIgnoreCase))
         {
             var melding = $"'{model}' is op {ServerNaam(instelling.Provider)} geen chatmodel met minstens {minimum:N0} tokens context en kan niet voor {AanvragerVan(context)} gebruikt worden. Kies in Jabasoft (Instellingen > {AanvragerVan(context)}) een van: {string.Join(", ", bruikbaar)}.";
