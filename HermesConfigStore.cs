@@ -416,9 +416,20 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
             }
 
             using var proces = Process.GetProcessById(pid.GetInt32());
+
+            // Een oud gateway.pid kan wijzen naar een nummer dat Windows inmiddels
+            // aan een ander proces gaf (bijvoorbeeld een systeemproces, waar de
+            // broker niet in mag kijken). Alleen een Python-proces kan de gateway zijn.
+            if (!proces.ProcessName.Contains("python", StringComparison.OrdinalIgnoreCase) &&
+                !proces.ProcessName.Contains("hermes", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
             return !proces.HasExited;
         }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or JsonException or IOException or FormatException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or JsonException or IOException or FormatException
+                                       or System.ComponentModel.Win32Exception)
         {
             return false;
         }
