@@ -50,12 +50,28 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
     {
         var geindexeerd = 0;
         var overgeslagen = 0;
+        var ongewijzigd = 0;
+
+        // Wat er voor dit project al staat, in één keer: per bestand opzoeken kost bij een groot project honderden
+        // losse vragen aan de database.
+        var bestaande = await db.SearchDocuments
+            .Where(d => d.Project == request.Project)
+            .ToDictionaryAsync(d => d.FilePath, StringComparer.OrdinalIgnoreCase, cancellationToken);
 
         foreach (var bestand in request.Files)
         {
             if (string.IsNullOrWhiteSpace(bestand.Content))
             {
                 overgeslagen++;
+                continue;
+            }
+
+            // Zelfde inhoud en zelfde model als de vorige keer: de vector klopt nog, niet opnieuw embedden.
+            var hash = Hash(bestand.Content);
+            bestaande.TryGetValue(bestand.Path, out var bestaand);
+            if (bestaand is not null && bestaand.ContentHash == hash && bestaand.Model == request.Model)
+            {
+                ongewijzigd++;
                 continue;
             }
 
@@ -73,10 +89,6 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
                 ? bestand.Content[..MaxBewaardeTekst]
                 : bestand.Content;
 
-            var bestaand = await db.SearchDocuments.SingleOrDefaultAsync(
-                d => d.Project == request.Project && d.FilePath == bestand.Path,
-                cancellationToken);
-
             if (bestaand is null)
             {
                 db.SearchDocuments.Add(new SearchDocument
@@ -84,6 +96,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
                     Project = request.Project,
                     FilePath = bestand.Path,
                     Model = request.Model,
+                    ContentHash = hash,
                     Content = bewaardeTekst,
                     Embedding = JsonSerializer.Serialize(resultaat.Vector),
                 });
@@ -91,6 +104,7 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
             else
             {
                 bestaand.Model = request.Model;
+                bestaand.ContentHash = hash;
                 bestaand.Content = bewaardeTekst;
                 bestaand.Embedding = JsonSerializer.Serialize(resultaat.Vector);
             }
@@ -98,16 +112,31 @@ internal sealed class SearchIndexStore(AiDbContext db, ProviderClient client, To
             geindexeerd++;
         }
 
+        // De lijst is het hele project: wat er in de index staat maar niet meer in het project, is verdwenen
+        // (verwijderd of verplaatst) en zou anders als verouderde treffer blijven opduiken.
+        var verwijderd = 0;
+        if (request.RemoveMissing)
+        {
+            var aanwezig = request.Files.Select(f => f.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var weg in bestaande.Values.Where(d => !aanwezig.Contains(d.FilePath)))
+            {
+                db.SearchDocuments.Remove(weg);
+                verwijderd++;
+            }
+        }
+
         await db.SaveChangesAsync(cancellationToken);
 
-        log.Add(
-            "broker",
-            overgeslagen > 0
-                ? $"Zoekindex bijgewerkt voor {request.Project}: {geindexeerd} bestanden, {overgeslagen} overgeslagen"
-                : $"Zoekindex bijgewerkt voor {request.Project}: {geindexeerd} bestanden");
+        log.Add("broker", $"Zoekindex bijgewerkt voor {request.Project}: {geindexeerd} opnieuw, {ongewijzigd} ongewijzigd"
+                          + (overgeslagen > 0 ? $", {overgeslagen} overgeslagen" : "")
+                          + (verwijderd > 0 ? $", {verwijderd} verdwenen bestanden eruit" : ""));
 
-        return new SearchIndexResult(true, geindexeerd, overgeslagen, null);
+        return new SearchIndexResult(true, geindexeerd, overgeslagen, null, ongewijzigd, verwijderd);
     }
+
+    /// <summary>SHA-256 van de volledige inhoud, als hex: de vingerafdruk waarmee een ongewijzigd bestand herkend wordt.</summary>
+    private static string Hash(string inhoud) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(inhoud)));
 
     /// <summary>
     /// Embedt elk al geïndexeerd bestand OPNIEUW met het meegegeven model -
