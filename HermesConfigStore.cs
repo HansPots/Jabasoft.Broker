@@ -379,6 +379,8 @@ internal sealed class HermesConfigStore(IHttpClientFactory httpClients, AiSettin
                 SchrijfRoot(root);
             }
 
+            // Vanaf nu wint de kaart, tot je in Hermes zelf weer een ander model kiest (zie HermesProxy.VolgHermesKeuze).
+            HermesProxy.HermesKaartOpgeslagen();
             log.Add("broker", $"Hermes ingesteld: {nieuw.Provider} '{nieuw.Model}', lokaal '{nieuw.LokaalModel}', Jabasoft-tools {(nieuw.JabasoftMcp ? "aan" : "uit")}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or YamlDotNet.Core.YamlException)

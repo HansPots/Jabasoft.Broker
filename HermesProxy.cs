@@ -130,19 +130,68 @@ internal static class HermesProxy
 
     private static readonly Lock HermesKeuzeSlot = new();
 
-    /// <summary>Het hoofdmodel dat Hermes bij zijn vorige vraag noemde - zie <see cref="VolgHermesKeuze"/>. Null = nog geen vraag sinds de start.</summary>
-    private static string? _hermesVorigeVraag;
+    /// <summary>
+    /// Waar de broker bijhoudt welk hoofdmodel Hermes noemt, sinds wanneer, en wanneer de Hermes-kaart voor het laatst
+    /// is opgeslagen - zodat <see cref="VolgHermesKeuze"/> ook na een herstart van de broker weet wie het laatst wisselde.
+    /// </summary>
+    private static readonly string HermesKeuzePad = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Jabasoft", "Broker", "hermes-keuze.json");
+
+    private sealed record HermesKeuze(string? Model, DateTimeOffset Sinds, DateTimeOffset KaartOpgeslagen);
+
+    private static HermesKeuze _hermesKeuze = LeesHermesKeuze();
+
+    private static HermesKeuze LeesHermesKeuze()
+    {
+        try
+        {
+            if (File.Exists(HermesKeuzePad) && JsonSerializer.Deserialize<HermesKeuze>(File.ReadAllText(HermesKeuzePad)) is { } keuze)
+            {
+                return keuze;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+        }
+
+        return new HermesKeuze(null, DateTimeOffset.MinValue, DateTimeOffset.MinValue);
+    }
+
+    private static void BewaarHermesKeuze(HermesKeuze keuze)
+    {
+        _hermesKeuze = keuze;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(HermesKeuzePad)!);
+            File.WriteAllText(HermesKeuzePad, JsonSerializer.Serialize(keuze));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Niet kunnen bewaren: in het werkgeheugen klopt het nog; alleen na een herstart is het weg.
+        }
+    }
+
+    /// <summary>De Hermes-kaart is opgeslagen (HermesConfigStore.BewaarAsync): vanaf nu wint de kaart, tot je in Hermes zelf weer wisselt.</summary>
+    public static void HermesKaartOpgeslagen()
+    {
+        lock (HermesKeuzeSlot)
+        {
+            BewaarHermesKeuze(_hermesKeuze with { KaartOpgeslagen = DateTimeOffset.UtcNow });
+        }
+    }
 
     /// <summary>
     /// Wie het laatst wisselt, wint. Hermes stuurt bij elke vraag het model dat hij gebruikt: het model uit zijn config bij
-    /// het opstarten, of wat je daarna in Hermes zelf koos. Noemt Hermes ineens een ander (bruikbaar) model dan bij de
-    /// vorige vraag, dan heb je in Hermes gewisseld: dat model wordt het hoofdmodel in config.yaml, en dus ook op de
-    /// Hermes-kaart, zodat <see cref="KiesModel"/> het daarna gewoon gebruikt. Blijft Hermes dezelfde naam sturen terwijl
-    /// de kaart iets anders zegt, dan is er op de kaart gewisseld en wint de kaart (zoals voorheen).
+    /// het opstarten, of wat je daarna in Hermes zelf koos. De broker onthoudt sinds wanneer Hermes zijn huidige model
+    /// noemt, en wanneer de Hermes-kaart voor het laatst is opgeslagen:
     ///
-    /// Niet voor beeldvragen of het beeldmodel (een bijtaak, geen wissel), niet op Ollama (daar staan de Hermes-modellen
-    /// in de broker-instelling) en niet bij de eerste vraag na een herstart van de broker: dan is er nog niets om mee te
-    /// vergelijken en gaat de kaart voor.
+    ///  - Hermes noemt dit model pas SINDS de laatste keer dat de kaart werd opgeslagen: je hebt in Hermes gewisseld. Dat
+    ///    model wordt het hoofdmodel in config.yaml (dus ook op de Hermes-kaart), zodat <see cref="KiesModel"/> het gebruikt.
+    ///  - Hermes noemde dit model al vóór de kaart werd opgeslagen: er is daarna op de kaart gewisseld, en de kaart wint.
+    ///
+    /// Beide tijden staan in een bestand (<see cref="HermesKeuzePad"/>), dus dit geldt ook direct na een herstart van de
+    /// broker. Niet voor beeldvragen of het beeldmodel (een bijtaak, geen wissel), niet voor modellen die Hermes niet kan
+    /// gebruiken en niet op Ollama (daar staan de Hermes-modellen in de broker-instelling).
     /// </summary>
     private static void VolgHermesKeuze(string gevraagd, string vraagTekst, IReadOnlyCollection<string> bruikbaar, ActivityLog log)
     {
@@ -159,12 +208,14 @@ internal static class HermesProxy
 
         lock (HermesKeuzeSlot)
         {
-            var vorige = _hermesVorigeVraag;
-            _hermesVorigeVraag = gevraagd;
-            if (vorige is null ||
-                string.Equals(vorige, gevraagd, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(gevraagd, hoofd, StringComparison.OrdinalIgnoreCase) ||
-                (bruikbaar.Count > 0 && !bruikbaar.Contains(gevraagd, StringComparer.OrdinalIgnoreCase)))
+            if (!string.Equals(_hermesKeuze.Model, gevraagd, StringComparison.OrdinalIgnoreCase))
+            {
+                BewaarHermesKeuze(_hermesKeuze with { Model = gevraagd, Sinds = DateTimeOffset.UtcNow });
+            }
+
+            if (string.Equals(gevraagd, hoofd, StringComparison.OrdinalIgnoreCase) ||
+                (bruikbaar.Count > 0 && !bruikbaar.Contains(gevraagd, StringComparer.OrdinalIgnoreCase)) ||
+                _hermesKeuze.Sinds <= _hermesKeuze.KaartOpgeslagen)
             {
                 return;
             }
